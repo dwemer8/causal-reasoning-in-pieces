@@ -1,5 +1,6 @@
 # Python and IDE settings
 venv
+.venv
 .idea
 
 # Project files
@@ -20,3 +21,6 @@ indices
 
 .claude
 CLAUDE.md
+
+*.pdf
+junk/
