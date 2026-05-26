@@ -5,13 +5,8 @@ from datetime import datetime
 
 import asyncio
 import pandas as pd
-import torch
 from dotenv import load_dotenv
-from huggingface_hub import login
-from transformers import pipeline, AutoTokenizer
 
-from deepseek_async_backend import run_experiments_deepseek_async
-from huggingface_backend import run_experiments_hf
 from openai_backend import run_experiments_openai_async
 
 
@@ -50,6 +45,18 @@ def parse_args() -> argparse.Namespace:
         choices=["single_stage_prompt", "minimal_prompt"],
         help="Which prompt to use: single_stage_prompt (detailed) or minimal_prompt (simple)"
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model ID to use (overrides backend default).",
+    )
+    parser.add_argument(
+        "--api-base",
+        type=str,
+        default=None,
+        help="Custom API base URL (e.g., https://llm-chat.sk.appliedai.ru/api).",
+    )
     return parser.parse_args()
 
 
@@ -83,11 +90,15 @@ def main() -> None:
                 num_experiments=args.num_experiments,
                 log_file=log_file,
                 api_key=api_key,
-                prompt_type=args.prompt_type
+                prompt_type=args.prompt_type,
+                model=args.model or "o3-mini",
+                base_url=args.api_base,
             )
         )
 
     elif args.backend == "deepseek":
+        from deepseek_async_backend import run_experiments_deepseek_async
+
         api_key = os.getenv("DEEPSEEK_API_KEY")
         if not api_key:
             raise ValueError("DEEPSEEK_API_KEY not found in environment variables.")
@@ -103,6 +114,11 @@ def main() -> None:
         )
 
     elif args.backend == "huggingface":
+        import torch
+        from huggingface_hub import login
+        from transformers import pipeline, AutoTokenizer
+        from huggingface_backend import run_experiments_hf
+
         hf_token = os.getenv("HF_TOKEN")
         if not hf_token:
             raise ValueError("HF_TOKEN not found in environment variables.")

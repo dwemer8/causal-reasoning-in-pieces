@@ -37,6 +37,18 @@ def parse_arguments() -> argparse.Namespace:
         help="Choose the LLM backend.",
     )
     parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model ID to use (overrides backend default).",
+    )
+    parser.add_argument(
+        "--api-base",
+        type=str,
+        default=None,
+        help="Custom API base URL (e.g., https://llm-chat.sk.appliedai.ru/api).",
+    )
+    parser.add_argument(
         "--mode",
         type=str,
         choices=["sequential", "batched"],
@@ -88,13 +100,13 @@ def prepare_input_samples(df: pd.DataFrame, num_experiments: int) -> list[dict]:
     return input_samples
 
 
-def create_client(backend: str, batch_size: int) -> BaseLLMClient:
+def create_client(backend: str, batch_size: int, model: str | None = None, api_base: str | None = None) -> BaseLLMClient:
     if backend == "openai":
-        client = OpenAIClient(model_id="o3-mini", concurrency=batch_size)
+        client = OpenAIClient(model_id=model or "o3-mini", concurrency=batch_size, base_url=api_base)
     elif backend == "huggingface":
         client = HuggingFaceClient(max_new_tokens=8192,  batch_size=batch_size, model_id="deepseek-ai/DeepSeek-R1-Distill-Llama-70B")
     else:
-        client = DeepSeekClient(concurrency=batch_size)
+        client = DeepSeekClient(concurrency=batch_size, model_id=model or "deepseek-reasoner", base_url=api_base or "https://api.deepseek.com")
     logging.info(f"Using {backend} backend for the pipeline.")
     return client
 
@@ -145,7 +157,7 @@ def main() -> None:
     input_samples = prepare_input_samples(df, args.num_experiments)
 
     # Create the LLM client based on backend choice.
-    client = create_client(args.backend, args.batch_size)
+    client = create_client(args.backend, args.batch_size, args.model, args.api_base)
     # tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Llama-70B")
 
     # Prepare the pipeline

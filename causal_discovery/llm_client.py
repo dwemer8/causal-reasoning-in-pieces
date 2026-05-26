@@ -4,10 +4,13 @@ from abc import ABC, abstractmethod
 from typing import Optional, Any
 
 import asyncio
-import torch
+from typing import TYPE_CHECKING
+
 from dotenv import load_dotenv
 from openai import OpenAI, AsyncOpenAI
-from transformers import Pipeline, pipeline
+
+if TYPE_CHECKING:
+    from transformers import Pipeline
 
 
 class BaseLLMClient(ABC):
@@ -28,7 +31,7 @@ class BaseLLMClient(ABC):
 
 
 class OpenAIClient(BaseLLMClient):
-    def __init__(self, model_id: str = "o3-mini", concurrency: int = 30) -> None:
+    def __init__(self, model_id: str = "o3-mini", concurrency: int = 30, base_url: str | None = None) -> None:
         """
         Initialize the OpenAI LLMClient with an API key from environment variables.
         """
@@ -37,8 +40,9 @@ class OpenAIClient(BaseLLMClient):
         if not api_key:
             raise ValueError("API key not found. Please set the OPENAI_API_KEY environment variable.")
 
-        self.client: OpenAI = OpenAI(api_key=api_key, timeout=120.0, max_retries=3)
+        self.client: OpenAI = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0, max_retries=3)
         self.api_key = api_key
+        self.base_url = base_url
         logging.info(f"Loaded OpenAI model: {model_id}")
 
         self.model_id = model_id
@@ -60,7 +64,7 @@ class OpenAIClient(BaseLLMClient):
         return asyncio.run(self._complete_batch_async(prompts))
 
     async def _complete_batch_async(self, prompts: list[str]) -> list[tuple[Optional[str], Optional[dict]]]:
-        async_client = AsyncOpenAI(api_key=self.api_key, timeout=120.0, max_retries=3)
+        async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=120.0, max_retries=3)
         semaphore = asyncio.Semaphore(self.concurrency)
 
         async def _call(p: str) -> tuple[Optional[str], Optional[dict]]:
@@ -97,13 +101,16 @@ class HuggingFaceClient(BaseLLMClient):
         :param batch_size: The batch size for processing, suggested maximum of 4, depending on the gpu.
         :param model_id: The model ID to load from Hugging Face hub.
         """
+        import torch
+        from transformers import pipeline
+
         self.max_new_tokens = max_new_tokens
         self.batch_size = batch_size
         logging.info(f"HuggingFaceClient initialized with max_new_tokens={max_new_tokens}, batch_size={batch_size}, model_id={model_id}")
 
         # Load the model from Hugging Face hub
         try:
-            self.pipeline: Pipeline = pipeline(
+            self.pipeline = pipeline(
                 "text-generation",
                 model=model_id,
                 torch_dtype=torch.bfloat16,
@@ -149,13 +156,13 @@ class DeepSeekClient(BaseLLMClient):
     Async DeepSeek client using AsyncOpenAI under the hood but exposes
     the sync interface for compatibility with a pipeline.
     """
-    def __init__(self, concurrency: int = 30, model_id: str = "deepseek-reasoner"):
+    def __init__(self, concurrency: int = 30, model_id: str = "deepseek-reasoner", base_url: str = "https://api.deepseek.com"):
         load_dotenv()
         api_key = os.getenv('DEEPSEEK_API_KEY')
         if not api_key:
             raise ValueError("DEEPSEEK_API_KEY not found in environment variables.")
         self.api_key = api_key
-        self.base_url = "https://api.deepseek.com"
+        self.base_url = base_url
         self.model_id = model_id
         self.concurrency = concurrency
 

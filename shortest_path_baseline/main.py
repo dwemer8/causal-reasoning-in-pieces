@@ -52,6 +52,18 @@ def parse_args() -> argparse.Namespace:
         choices=["easy", "hard"],
         help="Filter by difficulty level (default: all)",
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model ID to use (overrides backend default).",
+    )
+    parser.add_argument(
+        "--api-base",
+        type=str,
+        default=None,
+        help="Custom API base URL (e.g., https://llm-chat.sk.appliedai.ru/api).",
+    )
     return parser.parse_args()
 
 
@@ -95,6 +107,8 @@ def main() -> None:
                 log_file=log_file,
                 api_key=api_key,
                 prompt_type=args.prompt_type,
+                model=args.model or "o3-mini",
+                base_url=args.api_base,
             )
         )
 

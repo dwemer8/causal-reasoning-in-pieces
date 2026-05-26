@@ -20,6 +20,7 @@ _CONCURRENCY: int = 10
 async def _run_one(
     client: AsyncOpenAI,
     experiment: dict,
+    model: str = "o3-mini",
     max_attempts: int = 3
 ) -> tuple[Optional[dict], dict]:
     for attempt in range(1, max_attempts + 1):
@@ -30,7 +31,7 @@ async def _run_one(
             logging.info(f"Ground truth label: {experiment['label']}")
 
             resp = await client.chat.completions.create(
-                model="o3-mini",
+                model=model,
                 messages=[{"role": "user", "content": experiment["prompt"]}],
             )
 
@@ -69,18 +70,20 @@ async def run_experiments_openai_async(
     log_file: str,
     api_key: str,
     prompt_type: str = "single_stage_prompt",
+    model: str = "o3-mini",
+    base_url: str | None = None,
 ) -> None:
     # Prepare all experiments up front
     samples = df.sample(n=min(num_experiments, len(df)), replace=False)
     experiments = [prepare_experiment_from_row(row, prompt_type=prompt_type) for _, row in samples.iterrows()]
 
-    client = AsyncOpenAI(api_key=api_key)
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     sem = asyncio.Semaphore(_CONCURRENCY)
 
     async def sem_task(exp):
         async with sem:
-            result, log_entry = await _run_one(client, exp)
+            result, log_entry = await _run_one(client, exp, model=model)
             append_log(log_file, log_entry)
             return result
 
