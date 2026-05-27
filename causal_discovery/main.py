@@ -1,4 +1,5 @@
 import argparse
+import csv
 import logging
 import time
 from pathlib import Path
@@ -111,13 +112,13 @@ def create_client(backend: str, batch_size: int, model: str | None = None, api_b
     return client
 
 
-def post_process_logs(log_file: str) -> None:
+BENCHMARKS_FILE: Path = LOGS_DIR / "benchmarks.tsv"
+
+
+def post_process_logs(log_file: str, model: str) -> None:
     """
     Read the log CSV file, compute confusion matrix and performance metrics,
-    then print them out.
-    Assumes that each result dictionary contains:
-      - "hypothesis_label": a dict with key "hypothesis_answer" (the model's prediction, boolean)
-      - "sample_label": the ground truth label (boolean)
+    then print them out and append a row to the benchmarks TSV file.
     """
     df = pd.read_csv(log_file)
     df["hypothesis_label"] = df["hypothesis_label"].astype(int)
@@ -145,6 +146,34 @@ def post_process_logs(log_file: str) -> None:
     print(f"Precision: {precision:.4f}")
     print(f"Recall:    {recall:.4f}")
     print(f"F1 Score:  {f1:.4f}")
+
+    # Append benchmark row to TSV.
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    BENCHMARKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not BENCHMARKS_FILE.exists()
+    with open(BENCHMARKS_FILE, "a", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["model", "timestamp", "accuracy", "precision", "recall", "f1", "tp", "tn", "fp", "fn", "total"],
+            delimiter="\t",
+        )
+        if write_header:
+            writer.writeheader()
+        writer.writerow({
+            "model": model,
+            "timestamp": timestamp,
+            "accuracy": f"{accuracy:.4f}",
+            "precision": f"{precision:.4f}",
+            "recall": f"{recall:.4f}",
+            "f1": f"{f1:.4f}",
+            "tp": tp,
+            "tn": tn,
+            "fp": fp,
+            "fn": fn,
+            "total": total,
+        })
+    logging.info(f"Benchmark results appended to {BENCHMARKS_FILE}")
 
 
 def main() -> None:
@@ -195,7 +224,8 @@ def main() -> None:
     logging.info(f"Total execution time: {end_time - start_time:.2f} seconds")
 
     # Run results post-processing.
-    post_process_logs(str(logger.log_file))
+    effective_model = args.model or {"openai": "o3-mini", "huggingface": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B", "deepseek": "deepseek-reasoner"}[args.backend]
+    post_process_logs(str(logger.log_file), effective_model)
 
     if failed_ids:
         logging.info(f"Total failed experiments after max retries: {len(failed_ids)}")
