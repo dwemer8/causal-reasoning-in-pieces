@@ -3,6 +3,7 @@ import csv
 import logging
 import time
 from pathlib import Path
+import datetime
 
 import pandas as pd
 from tqdm import tqdm
@@ -14,6 +15,7 @@ from pipeline.stages import UndirectedSkeletonStage, VStructuresStage, MeekRules
 from llm_client import OpenAIClient, BaseLLMClient, HuggingFaceClient, DeepSeekClient
 
 LOGS_DIR: Path = Path("causal_discovery/logs")
+BENCHMARKS_FILE: Path = LOGS_DIR / "benchmarks.tsv"
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -40,7 +42,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        default=None,
         help="Model ID to use (overrides backend default).",
     )
     parser.add_argument(
@@ -67,6 +68,18 @@ def parse_arguments() -> argparse.Namespace:
         type=int,
         default=64,
         help="Batch size for batch processing.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Sampling temperature for the LLM. If not set, uses backend default.",
+    )
+    parser.add_argument(
+        "--top_p",
+        type=float,
+        default=1.0,
+        help="Top-p (nucleus) sampling parameter for the LLM. If not set, uses backend default.",
     )
     return parser.parse_args()
 
@@ -101,18 +114,15 @@ def prepare_input_samples(df: pd.DataFrame, num_experiments: int) -> list[dict]:
     return input_samples
 
 
-def create_client(backend: str, batch_size: int, model: str | None = None, api_base: str | None = None) -> BaseLLMClient:
+def create_client(backend: str, batch_size: int, model: str, api_base: str | None = None, temperature: float | None = None, top_p: float | None = None) -> BaseLLMClient:
     if backend == "openai":
-        client = OpenAIClient(model_id=model or "o3-mini", concurrency=batch_size, base_url=api_base)
+        client = OpenAIClient(model_id=model, concurrency=batch_size, base_url=api_base, temperature=temperature, top_p=top_p)
     elif backend == "huggingface":
-        client = HuggingFaceClient(max_new_tokens=8192,  batch_size=batch_size, model_id="deepseek-ai/DeepSeek-R1-Distill-Llama-70B")
+        client = HuggingFaceClient(max_new_tokens=8192, batch_size=batch_size, model_id=model, temperature=temperature, top_p=top_p)
     else:
-        client = DeepSeekClient(concurrency=batch_size, model_id=model or "deepseek-reasoner", base_url=api_base or "https://api.deepseek.com")
+        client = DeepSeekClient(concurrency=batch_size, model_id=model, base_url=api_base or "https://api.deepseek.com", temperature=temperature, top_p=top_p)
     logging.info(f"Using {backend} backend for the pipeline.")
     return client
-
-
-BENCHMARKS_FILE: Path = LOGS_DIR / "benchmarks.tsv"
 
 
 def post_process_logs(log_file: str, model: str) -> None:
@@ -148,7 +158,6 @@ def post_process_logs(log_file: str, model: str) -> None:
     print(f"F1 Score:  {f1:.4f}")
 
     # Append benchmark row to TSV.
-    import datetime
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     BENCHMARKS_FILE.parent.mkdir(parents=True, exist_ok=True)
     write_header = not BENCHMARKS_FILE.exists()
@@ -186,7 +195,7 @@ def main() -> None:
     input_samples = prepare_input_samples(df, args.num_experiments)
 
     # Create the LLM client based on backend choice.
-    client = create_client(args.backend, args.batch_size, args.model, args.api_base)
+    client = create_client(args.backend, args.batch_size, args.model, args.api_base, args.temperature, args.top_p)
     # tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Llama-70B")
 
     # Prepare the pipeline
@@ -224,8 +233,7 @@ def main() -> None:
     logging.info(f"Total execution time: {end_time - start_time:.2f} seconds")
 
     # Run results post-processing.
-    effective_model = args.model or {"openai": "o3-mini", "huggingface": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B", "deepseek": "deepseek-reasoner"}[args.backend]
-    post_process_logs(str(logger.log_file), effective_model)
+    post_process_logs(str(logger.log_file), args.model)
 
     if failed_ids:
         logging.info(f"Total failed experiments after max retries: {len(failed_ids)}")

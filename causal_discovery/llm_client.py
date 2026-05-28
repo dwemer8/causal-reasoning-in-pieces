@@ -31,7 +31,7 @@ class BaseLLMClient(ABC):
 
 
 class OpenAIClient(BaseLLMClient):
-    def __init__(self, model_id: str = "o3-mini", concurrency: int = 30, base_url: str | None = None) -> None:
+    def __init__(self, model_id: str = "o3-mini", concurrency: int = 30, base_url: str | None = None, temperature: float | None = None, top_p: float | None = None) -> None:
         """
         Initialize the OpenAI LLMClient with an API key from environment variables.
         """
@@ -47,14 +47,18 @@ class OpenAIClient(BaseLLMClient):
 
         self.model_id = model_id
         self.concurrency = concurrency
+        self.temperature = temperature
+        self.top_p = top_p
 
 
     def complete(self, prompt: str) -> tuple[Optional[str], Optional[dict]]:
         messages = [{"role": "user", "content": prompt}]
-        response = self.client.chat.completions.create(
-            model=self.model_id,
-            messages=messages
-        )
+        kwargs: dict = {"model": self.model_id, "messages": messages}
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        if self.top_p is not None:
+            kwargs["top_p"] = self.top_p
+        response = self.client.chat.completions.create(**kwargs)
 
         usage = response.usage
         text = response.choices[0].message.content
@@ -70,10 +74,12 @@ class OpenAIClient(BaseLLMClient):
         async def _call(p: str) -> tuple[Optional[str], Optional[dict]]:
             try:
                 async with semaphore:
-                    resp = await async_client.chat.completions.create(
-                        model=self.model_id,
-                        messages=[{"role": "user", "content": p}]
-                    )
+                    kwargs = {"model": self.model_id, "messages": [{"role": "user", "content": p}]}
+                    if self.temperature is not None:
+                        kwargs["temperature"] = self.temperature
+                    if self.top_p is not None:
+                        kwargs["top_p"] = self.top_p
+                    resp = await async_client.chat.completions.create(**kwargs)
                 return resp.choices[0].message.content, resp.usage
             except Exception as e:
                 logging.error(f"LLM call failed: {e}")
@@ -92,7 +98,7 @@ class OpenAIClient(BaseLLMClient):
 
 
 class HuggingFaceClient(BaseLLMClient):
-    def __init__(self, max_new_tokens: int, batch_size: int, model_id: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-70B") -> None:
+    def __init__(self, max_new_tokens: int, batch_size: int, model_id: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-70B", temperature: float | None = None, top_p: float | None = None) -> None:
         """
         Load the Hugging Face model during initialization.
         Make sure that the user is authenticated into huggingface hub.
@@ -106,6 +112,8 @@ class HuggingFaceClient(BaseLLMClient):
 
         self.max_new_tokens = max_new_tokens
         self.batch_size = batch_size
+        self.temperature = temperature
+        self.top_p = top_p
         logging.info(f"HuggingFaceClient initialized with max_new_tokens={max_new_tokens}, batch_size={batch_size}, model_id={model_id}")
 
         # Load the model from Hugging Face hub
@@ -125,9 +133,10 @@ class HuggingFaceClient(BaseLLMClient):
         messages = [{"role": "user", "content": prompt}]
         logging.debug("Sending prompt to Hugging Face model: %s", messages)
 
-        outputs = self.pipeline(messages,
-                                max_new_tokens=self.max_new_tokens,
-                                temperature=0.6)
+        pipeline_kwargs = {"max_new_tokens": self.max_new_tokens, "temperature": self.temperature or 0.6}
+        if self.top_p is not None:
+            pipeline_kwargs["top_p"] = self.top_p
+        outputs = self.pipeline(messages, **pipeline_kwargs)
         logging.debug("Raw outputs from sequential pipeline: %s", outputs)
 
         try:
@@ -139,10 +148,10 @@ class HuggingFaceClient(BaseLLMClient):
         messages = [[{"role": "user", "content": prompt}] for prompt in prompts]
         logging.debug("Sending batch of prompts to Hugging Face model: %s", messages)
 
-        outputs = self.pipeline(messages,
-                                max_new_tokens=self.max_new_tokens,
-                                batch_size=self.batch_size,
-                                temperature=0.6)
+        pipeline_kwargs = {"max_new_tokens": self.max_new_tokens, "batch_size": self.batch_size, "temperature": self.temperature or 0.6}
+        if self.top_p is not None:
+            pipeline_kwargs["top_p"] = self.top_p
+        outputs = self.pipeline(messages, **pipeline_kwargs)
         logging.debug("Raw outputs from batch pipeline: %s", outputs)
 
         try:
@@ -156,7 +165,7 @@ class DeepSeekClient(BaseLLMClient):
     Async DeepSeek client using AsyncOpenAI under the hood but exposes
     the sync interface for compatibility with a pipeline.
     """
-    def __init__(self, concurrency: int = 30, model_id: str = "deepseek-reasoner", base_url: str = "https://api.deepseek.com"):
+    def __init__(self, concurrency: int = 30, model_id: str = "deepseek-reasoner", base_url: str = "https://api.deepseek.com", temperature: float | None = None, top_p: float | None = None):
         load_dotenv()
         api_key = os.getenv('DEEPSEEK_API_KEY')
         if not api_key:
@@ -165,6 +174,8 @@ class DeepSeekClient(BaseLLMClient):
         self.base_url = base_url
         self.model_id = model_id
         self.concurrency = concurrency
+        self.temperature = temperature
+        self.top_p = top_p
 
     def complete(self, prompt: str) -> tuple[str, Any]:
         """
@@ -176,12 +187,12 @@ class DeepSeekClient(BaseLLMClient):
     async def _complete_async(self, prompt: str) -> tuple[str, Any]:
         async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
         try:
-            resp = await async_client.chat.completions.create(
-                model=self.model_id,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                stream=False,
-            )
+            kwargs: dict = {"model": self.model_id, "messages": [{"role": "user", "content": prompt}], "stream": False}
+            if self.temperature is not None:
+                kwargs["temperature"] = self.temperature
+            if self.top_p is not None:
+                kwargs["top_p"] = self.top_p
+            resp = await async_client.chat.completions.create(**kwargs)
             usage = resp.usage
             text = resp.choices[0].message.content
             return text, usage
@@ -201,12 +212,12 @@ class DeepSeekClient(BaseLLMClient):
 
         async def _call(p: str) -> tuple[str, Any]:
             async with semaphore:
-                resp = await async_client.chat.completions.create(
-                    model=self.model_id,
-                    messages=[{"role": "user", "content": p}],
-                    temperature=0.1,
-                    stream=False,
-                )
+                kwargs: dict = {"model": self.model_id, "messages": [{"role": "user", "content": p}], "stream": False}
+                if self.temperature is not None:
+                    kwargs["temperature"] = self.temperature
+                if self.top_p is not None:
+                    kwargs["top_p"] = self.top_p
+                resp = await async_client.chat.completions.create(**kwargs)
             text = resp.choices[0].message.content
             usage = resp.usage
             return text, usage

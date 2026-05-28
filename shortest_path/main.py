@@ -95,6 +95,18 @@ def parse_arguments() -> argparse.Namespace:
         default=None,
         help="Path to a JSON file with failed sample IDs from a previous run. Only these samples will be retried.",
     )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Sampling temperature for the LLM. If not set, uses backend default.",
+    )
+    parser.add_argument(
+        "--top_p",
+        type=float,
+        default=None,
+        help="Top-p (nucleus) sampling parameter for the LLM. If not set, uses backend default.",
+    )
     return parser.parse_args()
 
 
@@ -125,13 +137,13 @@ def prepare_input_samples(samples: list[dict], num_experiments: int, difficulty:
     return input_samples
 
 
-def create_client(backend: str, batch_size: int, model: str | None = None, api_base: str | None = None) -> BaseLLMClient:
+def create_client(backend: str, batch_size: int, model: str | None = None, api_base: str | None = None, temperature: float | None = None, top_p: float | None = None) -> BaseLLMClient:
     if backend == "openai":
-        client = OpenAIClient(model_id=model or "o3-mini", concurrency=batch_size, base_url=api_base)
+        client = OpenAIClient(model_id=model or "o3-mini", concurrency=batch_size, base_url=api_base, temperature=temperature, top_p=top_p)
     elif backend == "huggingface":
-        client = HuggingFaceClient(max_new_tokens=8192, batch_size=batch_size)
+        client = HuggingFaceClient(max_new_tokens=8192, batch_size=batch_size, temperature=temperature, top_p=top_p)
     else:
-        client = DeepSeekClient(concurrency=batch_size, model_id=model or "deepseek-reasoner", base_url=api_base or "https://api.deepseek.com")
+        client = DeepSeekClient(concurrency=batch_size, model_id=model or "deepseek-reasoner", base_url=api_base or "https://api.deepseek.com", temperature=temperature, top_p=top_p)
     logging.info(f"Using {backend} backend for the pipeline.")
     return client
 
@@ -180,7 +192,7 @@ def main() -> None:
         input_samples = prepare_input_samples(all_samples, args.num_experiments, args.difficulty)
 
     # Create LLM client
-    client = create_client(args.backend, args.batch_size, args.model, args.api_base)
+    client = create_client(args.backend, args.batch_size, args.model, args.api_base, args.temperature, args.top_p)
 
     # Create stages
     stages = [
