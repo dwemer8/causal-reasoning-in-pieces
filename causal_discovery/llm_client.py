@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
 from typing import Optional, Any
 
@@ -8,6 +9,9 @@ from typing import TYPE_CHECKING
 
 from dotenv import load_dotenv
 from openai import OpenAI, AsyncOpenAI
+
+RETRY_MAX_SECONDS = 120
+RETRY_BASE_DELAY = 1.0
 
 if TYPE_CHECKING:
     from transformers import Pipeline
@@ -68,16 +72,23 @@ class OpenAIClient(BaseLLMClient):
         semaphore = asyncio.Semaphore(self.concurrency)
 
         async def _call(p: str) -> tuple[Optional[str], Optional[dict]]:
-            try:
-                async with semaphore:
-                    resp = await async_client.chat.completions.create(
-                        model=self.model_id,
-                        messages=[{"role": "user", "content": p}]
-                    )
-                return resp.choices[0].message.content, resp.usage
-            except Exception as e:
-                logging.error(f"LLM call failed: {e}")
-                return None, None
+            deadline = time.monotonic() + RETRY_MAX_SECONDS
+            delay = RETRY_BASE_DELAY
+            while True:
+                try:
+                    async with semaphore:
+                        resp = await async_client.chat.completions.create(
+                            model=self.model_id,
+                            messages=[{"role": "user", "content": p}]
+                        )
+                    return resp.choices[0].message.content, resp.usage
+                except Exception as e:
+                    if time.monotonic() >= deadline:
+                        logging.error("LLM call failed after %.0fs retries: %s", RETRY_MAX_SECONDS, e)
+                        return None, None
+                    logging.warning("LLM call failed, retrying in %.1fs: %s", delay, e)
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 30.0)
 
         try:
             tasks = []
@@ -200,16 +211,27 @@ class DeepSeekClient(BaseLLMClient):
         semaphore = asyncio.Semaphore(self.concurrency)
 
         async def _call(p: str) -> tuple[str, Any]:
-            async with semaphore:
-                resp = await async_client.chat.completions.create(
-                    model=self.model_id,
-                    messages=[{"role": "user", "content": p}],
-                    temperature=0.1,
-                    stream=False,
-                )
-            text = resp.choices[0].message.content
-            usage = resp.usage
-            return text, usage
+            deadline = time.monotonic() + RETRY_MAX_SECONDS
+            delay = RETRY_BASE_DELAY
+            while True:
+                try:
+                    async with semaphore:
+                        resp = await async_client.chat.completions.create(
+                            model=self.model_id,
+                            messages=[{"role": "user", "content": p}],
+                            temperature=0.1,
+                            stream=False,
+                        )
+                    text = resp.choices[0].message.content
+                    usage = resp.usage
+                    return text, usage
+                except Exception as e:
+                    if time.monotonic() >= deadline:
+                        logging.error("LLM call failed after %.0fs retries: %s", RETRY_MAX_SECONDS, e)
+                        return None, None
+                    logging.warning("LLM call failed, retrying in %.1fs: %s", delay, e)
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 30.0)
 
         try:
             tasks = []

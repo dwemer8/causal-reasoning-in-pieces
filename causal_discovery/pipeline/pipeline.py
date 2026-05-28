@@ -44,7 +44,8 @@ class BatchCasualDiscoveryPipeline:
     """
     Pipeline that extends CausalDiscoveryPipeline to handle batch processing.
     Failed samples flow through with None values and are collected at the end.
-    Retries are handled by the OpenAI SDK (max_retries on the client).
+    Retries are handled by the OpenAI SDK (max_retries on the client) and
+    a 120-second exponential-backoff wrapper on batch LLM calls.
     """
     def __init__(self, pipeline: CausalDiscoveryPipeline, batch_size: int = 4):
         """
@@ -66,5 +67,9 @@ class BatchCasualDiscoveryPipeline:
 
             batch_results = self.pipeline.run_batch(batch)
             results.extend(batch_results)
+
+            for sample in batch_results:
+                if sample.get("hypothesis_label") is None:
+                    failed_ids.append(sample["sample_id"])
 
         return results, failed_ids

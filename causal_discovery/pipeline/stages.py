@@ -35,10 +35,12 @@ class Stage(ABC):
         pass
 
     @staticmethod
-    def _format_edges(edges: set[tuple]) -> str:
+    def _format_edges(edges: set[tuple] | None) -> str:
         """
         Format a list of edges with line breaks for better readability in prompts.
         """
+        if edges is None:
+            return "[]"
         formatted = "[\n    "
         formatted += ",\n    ".join([str(edge) for edge in edges])
         formatted += "\n  ]"
@@ -202,27 +204,36 @@ class VStructuresStage(Stage):
                 missing = required_keys - input_data.keys()
                 logging.error("Sample %d is missing keys: %s", i, missing)
                 raise ValueError(f"Sample {i} must contain: {', '.join(required_keys)}.")
-            else:
-                logging.debug("Sample %d contains all required keys.", i)
 
-        # 2. Build prompts
-        prompts = []
+        # 2. Split inputs into valid and already-failed
+        valid_indices = []
+        failed_indices = []
         for i, input_data in enumerate(inputs):
-            try:
-                prompt = self.prompt_template.format(
-                    premise=input_data["premise"],
-                    nodes=input_data["nodes"],
-                    edges=self._format_edges(input_data["undirected_edges"]),
-                )
-                prompts.append(prompt)
-                logging.debug("Constructed prompt for sample %d: %s", i, prompt)
-            except Exception as e:
-                logging.error("Error constructing prompt for sample %d: %s", i, e)
-                raise
+            if input_data["nodes"] is None or input_data["undirected_edges"] is None:
+                logging.warning("Sample %d skipping VStructuresStage: prior stage failed.", i)
+                input_data["v_structures"] = None
+                failed_indices.append(i)
+            else:
+                valid_indices.append(i)
+
+        if not valid_indices:
+            return inputs
+
+        # 3. Build prompts for valid samples only
+        prompts = []
+        for i in valid_indices:
+            input_data = inputs[i]
+            prompt = self.prompt_template.format(
+                premise=input_data["premise"],
+                nodes=input_data["nodes"],
+                edges=self._format_edges(input_data["undirected_edges"]),
+            )
+            prompts.append(prompt)
+            logging.debug("Constructed prompt for sample %d: %s", i, prompt)
 
         logging.debug("All prompts constructed: %s", prompts)
 
-        # 3. Send batch
+        # 4. Send batch (valid samples only)
         try:
             responses = self.client.complete_batch(prompts=prompts)
             logging.info("Batch call returned %d responses.", len(responses))
@@ -230,22 +241,24 @@ class VStructuresStage(Stage):
             logging.error("Batch call failed: %s", e)
             raise
 
-        # 4. Unpack responses into texts and usages, and update token usage
-        for i, ((text, usage), item) in enumerate(zip(responses, inputs)):
+        # 5. Unpack responses and update token usage for valid samples
+        for j, i in enumerate(valid_indices):
+            text, usage = responses[j]
             logging.debug("Raw response text for sample %d: %s", i, text)
             logging.debug("Token usage for sample %d: %s", i, usage)
-            self._update_token_usage(item, usage)
+            self._update_token_usage(inputs[i], usage)
 
-        # 5. Parse skeleton from each response text
-        for i, ((text, _), item) in enumerate(zip(responses, inputs)):
+        # 6. Parse v-structures from each valid response
+        for j, i in enumerate(valid_indices):
+            text, _ = responses[j]
             try:
                 v_structures = extract_v_structures_json(answer=text)
-                item["v_structures"] = v_structures
+                inputs[i]["v_structures"] = v_structures
                 logging.debug("Extracted V-structures for sample %d: %s", i, v_structures)
             except Exception as e:
                 logging.error("Error extracting V-structures for sample %d: %s", i, e)
                 logging.debug("Problematic response for sample %d: %s", i, text)
-                item["v_structures"] = None
+                inputs[i]["v_structures"] = None
 
         return inputs
 
@@ -296,28 +309,36 @@ class MeekRulesStage(Stage):
             if missing_keys:
                 logging.error("Sample %d is missing keys: %s", i, missing_keys)
                 raise ValueError(f"Sample {i}: Input data must contain: {', '.join(required_keys)}.")
-            else:
-                logging.debug("Sample %d contains all required keys.", i)
 
-        # 2. Build prompts
-        prompts = []
+        # 2. Split inputs into valid and already-failed
+        valid_indices = []
         for i, input_data in enumerate(inputs):
-            try:
-                prompt = self.prompt_template.format(
-                    premise=input_data["premise"],
-                    nodes=input_data["nodes"],
-                    edges=self._format_edges(input_data["undirected_edges"]),
-                    v_structures=input_data["v_structures"]
-                )
-                prompts.append(prompt)
-                logging.debug("Constructed prompt for sample %d: %s", i, prompt)
-            except Exception as e:
-                logging.error("Error constructing prompt for sample %d: %s", i, e)
-                raise
+            if input_data["undirected_edges"] is None or input_data["v_structures"] is None:
+                logging.warning("Sample %d skipping MeekRulesStage: prior stage failed.", i)
+                input_data["directed_edges"] = None
+                input_data["undirected_edges"] = None
+            else:
+                valid_indices.append(i)
+
+        if not valid_indices:
+            return inputs
+
+        # 3. Build prompts for valid samples only
+        prompts = []
+        for i in valid_indices:
+            input_data = inputs[i]
+            prompt = self.prompt_template.format(
+                premise=input_data["premise"],
+                nodes=input_data["nodes"],
+                edges=self._format_edges(input_data["undirected_edges"]),
+                v_structures=input_data["v_structures"]
+            )
+            prompts.append(prompt)
+            logging.debug("Constructed prompt for sample %d: %s", i, prompt)
 
         logging.debug("All prompts constructed for batch: %s", prompts)
 
-        # 3. Send batch
+        # 4. Send batch (valid samples only)
         try:
             responses = self.client.complete_batch(prompts=prompts)
             logging.info("Batch call returned %d responses.", len(responses))
@@ -325,13 +346,16 @@ class MeekRulesStage(Stage):
             logging.error("Batch call failed: %s", e)
             raise
 
-            # 4. Unpack responses into texts and usages, and update token usage
-        for i, ((text, usage), item) in enumerate(zip(responses, inputs)):
+        # 5. Unpack responses and update token usage for valid samples
+        for j, i in enumerate(valid_indices):
+            text, usage = responses[j]
             logging.debug("Raw response text for sample %d: %s", i, text)
             logging.debug("Token usage for sample %d: %s", i, usage)
-            self._update_token_usage(item, usage)
+            self._update_token_usage(inputs[i], usage)
 
-        for i, ((text, _), item) in enumerate(zip(responses, inputs)):
+        # 6. Parse directed/undirected edges from each valid response
+        for j, i in enumerate(valid_indices):
+            text, _ = responses[j]
             try:
                 directed_edges = extract_directed_edges_literal_format_json(answer=text)
                 undirected_edges = extract_undirected_edges_literal_format_json(answer=text)
@@ -341,8 +365,8 @@ class MeekRulesStage(Stage):
                 logging.debug("Problematic response for sample %d: %s", i, text)
                 directed_edges = None
                 undirected_edges = None
-            item["directed_edges"] = directed_edges
-            item["undirected_edges"] = undirected_edges
+            inputs[i]["directed_edges"] = directed_edges
+            inputs[i]["undirected_edges"] = undirected_edges
 
         return inputs
 
@@ -393,29 +417,36 @@ class HypothesisEvaluationStage(Stage):
                 missing = required_keys - input_data.keys()
                 logging.error("Sample %d is missing keys: %s", i, missing)
                 raise ValueError(f"Sample {i} must contain: {', '.join(required_keys)}.")
-            else:
-                logging.debug("Sample %d contains all required keys.", i)
 
-        # 2. Build prompts
-        prompts = []
+        # 2. Split inputs into valid and already-failed
+        valid_indices = []
         for i, input_data in enumerate(inputs):
-            try:
-                prompt = self.prompt_template.format(
-                    premise=input_data["premise"],
-                    nodes=input_data["nodes"],
-                    directed_edges=self._format_edges(input_data["directed_edges"]),
-                    undirected_edges=self._format_edges(input_data["undirected_edges"]),
-                    hypothesis=input_data["hypothesis"]
-                )
-                prompts.append(prompt)
-                logging.debug("Constructed prompt for sample %d: %s", i, prompt)
-            except Exception as e:
-                logging.error("Error constructing prompt for sample %d: %s", i, e)
-                raise
+            if input_data["directed_edges"] is None or input_data["undirected_edges"] is None:
+                logging.warning("Sample %d skipping HypothesisEvaluationStage: prior stage failed.", i)
+                input_data["hypothesis_label"] = None
+            else:
+                valid_indices.append(i)
+
+        if not valid_indices:
+            return inputs
+
+        # 3. Build prompts for valid samples only
+        prompts = []
+        for i in valid_indices:
+            input_data = inputs[i]
+            prompt = self.prompt_template.format(
+                premise=input_data["premise"],
+                nodes=input_data["nodes"],
+                directed_edges=self._format_edges(input_data["directed_edges"]),
+                undirected_edges=self._format_edges(input_data["undirected_edges"]),
+                hypothesis=input_data["hypothesis"]
+            )
+            prompts.append(prompt)
+            logging.debug("Constructed prompt for sample %d: %s", i, prompt)
 
         logging.debug("All prompts constructed: %s", prompts)
 
-        # 3. Send batch
+        # 4. Send batch (valid samples only)
         try:
             responses = self.client.complete_batch(prompts=prompts)
             logging.info("Batch call returned %d responses.", len(responses))
@@ -423,20 +454,23 @@ class HypothesisEvaluationStage(Stage):
             logging.error("Batch call failed: %s", e)
             raise
 
-        # 4. Unpack responses into texts and usages, and update token usage
-        for i, ((text, usage), item) in enumerate(zip(responses, inputs)):
+        # 5. Unpack responses and update token usage for valid samples
+        for j, i in enumerate(valid_indices):
+            text, usage = responses[j]
             logging.debug("Raw response text for sample %d: %s", i, text)
             logging.debug("Token usage for sample %d: %s", i, usage)
-            self._update_token_usage(item, usage)
+            self._update_token_usage(inputs[i], usage)
 
-        for i, ((text, _), item) in enumerate(zip(responses, inputs)):
+        # 6. Parse hypothesis label from each valid response
+        for j, i in enumerate(valid_indices):
+            text, _ = responses[j]
             try:
                 hypothesis_label = extract_hypothesis_answer(answer=text)
-                item["hypothesis_label"] = hypothesis_label
+                inputs[i]["hypothesis_label"] = hypothesis_label
                 logging.debug("Extracted hypothesis_label for sample %d: %s", i, hypothesis_label)
             except Exception as e:
                 logging.error("Error extracting hypothesis_label for sample %d: %s", i, e)
                 logging.debug("Problematic response for sample %d: %s", i, text)
-                item["hypothesis_label"] = None
+                inputs[i]["hypothesis_label"] = None
 
         return inputs
