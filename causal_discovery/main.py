@@ -1,5 +1,4 @@
 import argparse
-import csv
 import logging
 import time
 from pathlib import Path
@@ -114,7 +113,8 @@ def prepare_input_samples(df: pd.DataFrame, num_experiments: int) -> list[dict]:
     return input_samples
 
 
-def create_client(backend: str, batch_size: int, model: str, api_base: str | None = None, temperature: float | None = None, top_p: float | None = None) -> BaseLLMClient:
+def create_client(backend: str, batch_size: int, model: str, api_base: str | None = None,
+                  temperature: float | None = None, top_p: float | None = None) -> BaseLLMClient:
     if backend == "openai":
         client = OpenAIClient(model_id=model, concurrency=batch_size, base_url=api_base, temperature=temperature, top_p=top_p)
     elif backend == "huggingface":
@@ -125,7 +125,7 @@ def create_client(backend: str, batch_size: int, model: str, api_base: str | Non
     return client
 
 
-def post_process_logs(log_file: str, model: str) -> None:
+def post_process_logs(log_file: str, model: str, temperature: float, top_p: float) -> None:
     """
     Read the log CSV file, compute confusion matrix and performance metrics,
     then print them out and append a row to the benchmarks TSV file.
@@ -159,29 +159,28 @@ def post_process_logs(log_file: str, model: str) -> None:
 
     # Append benchmark row to TSV.
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    new_row = pd.DataFrame([{
+        "model": model,
+        "timestamp": timestamp,
+        "temperature": f"{temperature}",
+        "top_p": f"{top_p}",
+        "accuracy": f"{accuracy:.4f}",
+        "precision": f"{precision:.4f}",
+        "recall": f"{recall:.4f}",
+        "f1": f"{f1:.4f}",
+        "tp": tp,
+        "tn": tn,
+        "fp": fp,
+        "fn": fn,
+        "total": total,
+    }])
     BENCHMARKS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not BENCHMARKS_FILE.exists()
-    with open(BENCHMARKS_FILE, "a", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["model", "timestamp", "accuracy", "precision", "recall", "f1", "tp", "tn", "fp", "fn", "total"],
-            delimiter="\t",
-        )
-        if write_header:
-            writer.writeheader()
-        writer.writerow({
-            "model": model,
-            "timestamp": timestamp,
-            "accuracy": f"{accuracy:.4f}",
-            "precision": f"{precision:.4f}",
-            "recall": f"{recall:.4f}",
-            "f1": f"{f1:.4f}",
-            "tp": tp,
-            "tn": tn,
-            "fp": fp,
-            "fn": fn,
-            "total": total,
-        })
+    if BENCHMARKS_FILE.exists():
+        existing = pd.read_csv(BENCHMARKS_FILE, sep="\t")
+        updated = pd.concat([existing, new_row], ignore_index=True)
+    else:
+        updated = new_row
+    updated.to_csv(BENCHMARKS_FILE, sep="\t", index=False)
     logging.info(f"Benchmark results appended to {BENCHMARKS_FILE}")
 
 
@@ -233,7 +232,7 @@ def main() -> None:
     logging.info(f"Total execution time: {end_time - start_time:.2f} seconds")
 
     # Run results post-processing.
-    post_process_logs(str(logger.log_file), args.model)
+    post_process_logs(str(logger.log_file), args.model, args.temperature, args.top_p)
 
     if failed_ids:
         logging.info(f"Total failed experiments after max retries: {len(failed_ids)}")
