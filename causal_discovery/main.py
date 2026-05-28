@@ -80,6 +80,30 @@ def parse_arguments() -> argparse.Namespace:
         default=1.0,
         help="Top-p (nucleus) sampling parameter for the LLM. If not set, uses backend default.",
     )
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=None,
+        help="Top-k sampling parameter for the LLM. If not set, uses backend default.",
+    )
+    parser.add_argument(
+        "--min_p",
+        type=float,
+        default=None,
+        help="Min-p sampling parameter for the LLM. If not set, uses backend default.",
+    )
+    parser.add_argument(
+        "--presence_penalty",
+        type=float,
+        default=None,
+        help="Presence penalty for the LLM. If not set, uses backend default.",
+    )
+    parser.add_argument(
+        "--repetition_penalty",
+        type=float,
+        default=None,
+        help="Repetition penalty for the LLM. If not set, uses backend default.",
+    )
     return parser.parse_args()
 
 
@@ -114,18 +138,24 @@ def prepare_input_samples(df: pd.DataFrame, num_experiments: int) -> list[dict]:
 
 
 def create_client(backend: str, batch_size: int, model: str, api_base: str | None = None,
-                  temperature: float | None = None, top_p: float | None = None) -> BaseLLMClient:
+                  temperature: float | None = None, top_p: float | None = None,
+                  top_k: int | None = None, min_p: float | None = None,
+                  presence_penalty: float | None = None,
+                  repetition_penalty: float | None = None) -> BaseLLMClient:
     if backend == "openai":
-        client = OpenAIClient(model_id=model, concurrency=batch_size, base_url=api_base, temperature=temperature, top_p=top_p)
+        client = OpenAIClient(model_id=model, concurrency=batch_size, base_url=api_base, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p, presence_penalty=presence_penalty, repetition_penalty=repetition_penalty)
     elif backend == "huggingface":
-        client = HuggingFaceClient(max_new_tokens=8192, batch_size=batch_size, model_id=model, temperature=temperature, top_p=top_p)
+        client = HuggingFaceClient(max_new_tokens=8192, batch_size=batch_size, model_id=model, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p, presence_penalty=presence_penalty, repetition_penalty=repetition_penalty)
     else:
-        client = DeepSeekClient(concurrency=batch_size, model_id=model, base_url=api_base or "https://api.deepseek.com", temperature=temperature, top_p=top_p)
+        client = DeepSeekClient(concurrency=batch_size, model_id=model, base_url=api_base or "https://api.deepseek.com", temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p, presence_penalty=presence_penalty, repetition_penalty=repetition_penalty)
     logging.info(f"Using {backend} backend for the pipeline.")
     return client
 
 
-def post_process_logs(log_file: str, model: str, temperature: float, top_p: float) -> None:
+def post_process_logs(log_file: str, model: str, temperature: float, top_p: float,
+                      top_k: int = None, min_p: float = None,
+                      presence_penalty: float = None,
+                      repetition_penalty: float = None) -> None:
     """
     Read the log CSV file, compute confusion matrix and performance metrics,
     then print them out and append a row to the benchmarks TSV file.
@@ -164,6 +194,10 @@ def post_process_logs(log_file: str, model: str, temperature: float, top_p: floa
         "timestamp": timestamp,
         "temperature": f"{temperature}",
         "top_p": f"{top_p}",
+        "top_k": f"{top_k}",
+        "min_p": f"{min_p}",
+        "presence_penalty": f"{presence_penalty}",
+        "repetition_penalty": f"{repetition_penalty}",
         "accuracy": f"{accuracy:.4f}",
         "precision": f"{precision:.4f}",
         "recall": f"{recall:.4f}",
@@ -194,7 +228,7 @@ def main() -> None:
     input_samples = prepare_input_samples(df, args.num_experiments)
 
     # Create the LLM client based on backend choice.
-    client = create_client(args.backend, args.batch_size, args.model, args.api_base, args.temperature, args.top_p)
+    client = create_client(args.backend, args.batch_size, args.model, args.api_base, args.temperature, args.top_p, args.top_k, args.min_p, args.presence_penalty, args.repetition_penalty)
     # tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Llama-70B")
 
     # Prepare the pipeline
@@ -232,7 +266,7 @@ def main() -> None:
     logging.info(f"Total execution time: {end_time - start_time:.2f} seconds")
 
     # Run results post-processing.
-    post_process_logs(str(logger.log_file), args.model, args.temperature, args.top_p)
+    post_process_logs(str(logger.log_file), args.model, args.temperature, args.top_p, args.top_k, args.min_p, args.presence_penalty, args.repetition_penalty)
 
     if failed_ids:
         logging.info(f"Total failed experiments after max retries: {len(failed_ids)}")

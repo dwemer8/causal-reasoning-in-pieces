@@ -31,7 +31,7 @@ class BaseLLMClient(ABC):
 
 
 class OpenAIClient(BaseLLMClient):
-    def __init__(self, model_id: str = "o3-mini", concurrency: int = 30, base_url: str | None = None, temperature: float | None = None, top_p: float | None = None) -> None:
+    def __init__(self, model_id: str = "o3-mini", concurrency: int = 30, base_url: str | None = None, temperature: float | None = None, top_p: float | None = None, top_k: int | None = None, min_p: float | None = None, presence_penalty: float | None = None, repetition_penalty: float | None = None) -> None:
         """
         Initialize the OpenAI LLMClient with an API key from environment variables.
         """
@@ -49,15 +49,37 @@ class OpenAIClient(BaseLLMClient):
         self.concurrency = concurrency
         self.temperature = temperature
         self.top_p = top_p
+        self.top_k = top_k
+        self.min_p = min_p
+        self.presence_penalty = presence_penalty
+        self.repetition_penalty = repetition_penalty
 
-
-    def complete(self, prompt: str) -> tuple[Optional[str], Optional[dict]]:
-        messages = [{"role": "user", "content": prompt}]
+    def _build_kwargs(self, messages: list[dict]) -> dict:
+        """Build kwargs dict for chat completions, routing non-standard params through extra_body."""
         kwargs: dict = {"model": self.model_id, "messages": messages}
         if self.temperature is not None:
             kwargs["temperature"] = self.temperature
         if self.top_p is not None:
             kwargs["top_p"] = self.top_p
+        if self.presence_penalty is not None:
+            kwargs["presence_penalty"] = self.presence_penalty
+
+        extra_body: dict = {}
+        if self.top_k is not None:
+            extra_body["top_k"] = self.top_k
+        if self.min_p is not None:
+            extra_body["min_p"] = self.min_p
+        if self.repetition_penalty is not None:
+            extra_body["repetition_penalty"] = self.repetition_penalty
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
+        return kwargs
+
+
+    def complete(self, prompt: str) -> tuple[Optional[str], Optional[dict]]:
+        messages = [{"role": "user", "content": prompt}]
+        kwargs = self._build_kwargs(messages)
         response = self.client.chat.completions.create(**kwargs)
 
         usage = response.usage
@@ -74,11 +96,7 @@ class OpenAIClient(BaseLLMClient):
         async def _call(p: str) -> tuple[Optional[str], Optional[dict]]:
             try:
                 async with semaphore:
-                    kwargs = {"model": self.model_id, "messages": [{"role": "user", "content": p}]}
-                    if self.temperature is not None:
-                        kwargs["temperature"] = self.temperature
-                    if self.top_p is not None:
-                        kwargs["top_p"] = self.top_p
+                    kwargs = self._build_kwargs([{"role": "user", "content": p}])
                     resp = await async_client.chat.completions.create(**kwargs)
                 return resp.choices[0].message.content, resp.usage
             except Exception as e:
@@ -98,7 +116,7 @@ class OpenAIClient(BaseLLMClient):
 
 
 class HuggingFaceClient(BaseLLMClient):
-    def __init__(self, max_new_tokens: int, batch_size: int, model_id: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-70B", temperature: float | None = None, top_p: float | None = None) -> None:
+    def __init__(self, max_new_tokens: int, batch_size: int, model_id: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-70B", temperature: float | None = None, top_p: float | None = None, top_k: int | None = None, min_p: float | None = None, presence_penalty: float | None = None, repetition_penalty: float | None = None) -> None:
         """
         Load the Hugging Face model during initialization.
         Make sure that the user is authenticated into huggingface hub.
@@ -114,6 +132,10 @@ class HuggingFaceClient(BaseLLMClient):
         self.batch_size = batch_size
         self.temperature = temperature
         self.top_p = top_p
+        self.top_k = top_k
+        self.min_p = min_p
+        self.presence_penalty = presence_penalty
+        self.repetition_penalty = repetition_penalty
         logging.info(f"HuggingFaceClient initialized with max_new_tokens={max_new_tokens}, batch_size={batch_size}, model_id={model_id}")
 
         # Load the model from Hugging Face hub
@@ -136,6 +158,14 @@ class HuggingFaceClient(BaseLLMClient):
         pipeline_kwargs = {"max_new_tokens": self.max_new_tokens, "temperature": self.temperature or 0.6}
         if self.top_p is not None:
             pipeline_kwargs["top_p"] = self.top_p
+        if self.top_k is not None:
+            pipeline_kwargs["top_k"] = self.top_k
+        if self.min_p is not None:
+            pipeline_kwargs["min_p"] = self.min_p
+        if self.presence_penalty is not None:
+            pipeline_kwargs["presence_penalty"] = self.presence_penalty
+        if self.repetition_penalty is not None:
+            pipeline_kwargs["repetition_penalty"] = self.repetition_penalty
         outputs = self.pipeline(messages, **pipeline_kwargs)
         logging.debug("Raw outputs from sequential pipeline: %s", outputs)
 
@@ -151,6 +181,14 @@ class HuggingFaceClient(BaseLLMClient):
         pipeline_kwargs = {"max_new_tokens": self.max_new_tokens, "batch_size": self.batch_size, "temperature": self.temperature or 0.6}
         if self.top_p is not None:
             pipeline_kwargs["top_p"] = self.top_p
+        if self.top_k is not None:
+            pipeline_kwargs["top_k"] = self.top_k
+        if self.min_p is not None:
+            pipeline_kwargs["min_p"] = self.min_p
+        if self.presence_penalty is not None:
+            pipeline_kwargs["presence_penalty"] = self.presence_penalty
+        if self.repetition_penalty is not None:
+            pipeline_kwargs["repetition_penalty"] = self.repetition_penalty
         outputs = self.pipeline(messages, **pipeline_kwargs)
         logging.debug("Raw outputs from batch pipeline: %s", outputs)
 
@@ -165,7 +203,7 @@ class DeepSeekClient(BaseLLMClient):
     Async DeepSeek client using AsyncOpenAI under the hood but exposes
     the sync interface for compatibility with a pipeline.
     """
-    def __init__(self, concurrency: int = 30, model_id: str = "deepseek-reasoner", base_url: str = "https://api.deepseek.com", temperature: float | None = None, top_p: float | None = None):
+    def __init__(self, concurrency: int = 30, model_id: str = "deepseek-reasoner", base_url: str = "https://api.deepseek.com", temperature: float | None = None, top_p: float | None = None, top_k: int | None = None, min_p: float | None = None, presence_penalty: float | None = None, repetition_penalty: float | None = None):
         load_dotenv()
         api_key = os.getenv('DEEPSEEK_API_KEY')
         if not api_key:
@@ -176,6 +214,32 @@ class DeepSeekClient(BaseLLMClient):
         self.concurrency = concurrency
         self.temperature = temperature
         self.top_p = top_p
+        self.top_k = top_k
+        self.min_p = min_p
+        self.presence_penalty = presence_penalty
+        self.repetition_penalty = repetition_penalty
+
+    def _build_kwargs(self, messages: list[dict]) -> dict:
+        """Build kwargs dict for chat completions, routing non-standard params through extra_body."""
+        kwargs: dict = {"model": self.model_id, "messages": messages, "stream": False}
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        if self.top_p is not None:
+            kwargs["top_p"] = self.top_p
+        if self.presence_penalty is not None:
+            kwargs["presence_penalty"] = self.presence_penalty
+
+        extra_body: dict = {}
+        if self.top_k is not None:
+            extra_body["top_k"] = self.top_k
+        if self.min_p is not None:
+            extra_body["min_p"] = self.min_p
+        if self.repetition_penalty is not None:
+            extra_body["repetition_penalty"] = self.repetition_penalty
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
+        return kwargs
 
     def complete(self, prompt: str) -> tuple[str, Any]:
         """
@@ -187,11 +251,7 @@ class DeepSeekClient(BaseLLMClient):
     async def _complete_async(self, prompt: str) -> tuple[str, Any]:
         async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
         try:
-            kwargs: dict = {"model": self.model_id, "messages": [{"role": "user", "content": prompt}], "stream": False}
-            if self.temperature is not None:
-                kwargs["temperature"] = self.temperature
-            if self.top_p is not None:
-                kwargs["top_p"] = self.top_p
+            kwargs = self._build_kwargs([{"role": "user", "content": prompt}])
             resp = await async_client.chat.completions.create(**kwargs)
             usage = resp.usage
             text = resp.choices[0].message.content
@@ -212,11 +272,7 @@ class DeepSeekClient(BaseLLMClient):
 
         async def _call(p: str) -> tuple[str, Any]:
             async with semaphore:
-                kwargs: dict = {"model": self.model_id, "messages": [{"role": "user", "content": p}], "stream": False}
-                if self.temperature is not None:
-                    kwargs["temperature"] = self.temperature
-                if self.top_p is not None:
-                    kwargs["top_p"] = self.top_p
+                kwargs = self._build_kwargs([{"role": "user", "content": p}])
                 resp = await async_client.chat.completions.create(**kwargs)
             text = resp.choices[0].message.content
             usage = resp.usage

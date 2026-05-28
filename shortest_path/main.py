@@ -107,6 +107,30 @@ def parse_arguments() -> argparse.Namespace:
         default=None,
         help="Top-p (nucleus) sampling parameter for the LLM. If not set, uses backend default.",
     )
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=None,
+        help="Top-k sampling parameter for the LLM. If not set, uses backend default.",
+    )
+    parser.add_argument(
+        "--min_p",
+        type=float,
+        default=None,
+        help="Min-p sampling parameter for the LLM. If not set, uses backend default.",
+    )
+    parser.add_argument(
+        "--presence_penalty",
+        type=float,
+        default=None,
+        help="Presence penalty for the LLM. If not set, uses backend default.",
+    )
+    parser.add_argument(
+        "--repetition_penalty",
+        type=float,
+        default=None,
+        help="Repetition penalty for the LLM. If not set, uses backend default.",
+    )
     return parser.parse_args()
 
 
@@ -137,13 +161,13 @@ def prepare_input_samples(samples: list[dict], num_experiments: int, difficulty:
     return input_samples
 
 
-def create_client(backend: str, batch_size: int, model: str | None = None, api_base: str | None = None, temperature: float | None = None, top_p: float | None = None) -> BaseLLMClient:
+def create_client(backend: str, batch_size: int, model: str | None = None, api_base: str | None = None, temperature: float | None = None, top_p: float | None = None, top_k: int | None = None, min_p: float | None = None, presence_penalty: float | None = None, repetition_penalty: float | None = None) -> BaseLLMClient:
     if backend == "openai":
-        client = OpenAIClient(model_id=model or "o3-mini", concurrency=batch_size, base_url=api_base, temperature=temperature, top_p=top_p)
+        client = OpenAIClient(model_id=model or "o3-mini", concurrency=batch_size, base_url=api_base, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p, presence_penalty=presence_penalty, repetition_penalty=repetition_penalty)
     elif backend == "huggingface":
-        client = HuggingFaceClient(max_new_tokens=8192, batch_size=batch_size, temperature=temperature, top_p=top_p)
+        client = HuggingFaceClient(max_new_tokens=8192, batch_size=batch_size, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p, presence_penalty=presence_penalty, repetition_penalty=repetition_penalty)
     else:
-        client = DeepSeekClient(concurrency=batch_size, model_id=model or "deepseek-reasoner", base_url=api_base or "https://api.deepseek.com", temperature=temperature, top_p=top_p)
+        client = DeepSeekClient(concurrency=batch_size, model_id=model or "deepseek-reasoner", base_url=api_base or "https://api.deepseek.com", temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p, presence_penalty=presence_penalty, repetition_penalty=repetition_penalty)
     logging.info(f"Using {backend} backend for the pipeline.")
     return client
 
@@ -192,7 +216,7 @@ def main() -> None:
         input_samples = prepare_input_samples(all_samples, args.num_experiments, args.difficulty)
 
     # Create LLM client
-    client = create_client(args.backend, args.batch_size, args.model, args.api_base, args.temperature, args.top_p)
+    client = create_client(args.backend, args.batch_size, args.model, args.api_base, args.temperature, args.top_p, args.top_k, args.min_p, args.presence_penalty, args.repetition_penalty)
 
     # Create stages
     stages = [
