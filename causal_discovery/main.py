@@ -161,6 +161,10 @@ def post_process_logs(log_file: str, model: str, temperature: float, top_p: floa
     then print them out and append a row to the benchmarks TSV file.
     """
     df = pd.read_csv(log_file)
+    n_nulls = df["hypothesis_label"].isnull().sum()
+    if n_nulls > 0:
+        logging.warning(f"Found {n_nulls} null values in the hypothesis label column. Dropping them.")
+        df = df.dropna(subset=["hypothesis_label"])
     df["hypothesis_label"] = df["hypothesis_label"].astype(int)
     df["sample_label"] = df["sample_label"].astype(int)
 
@@ -207,6 +211,7 @@ def post_process_logs(log_file: str, model: str, temperature: float, top_p: floa
         "fp": fp,
         "fn": fn,
         "total": total,
+        "n_nulls": n_nulls,
     }])
     BENCHMARKS_FILE.parent.mkdir(parents=True, exist_ok=True)
     if BENCHMARKS_FILE.exists():

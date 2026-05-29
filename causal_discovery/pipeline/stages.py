@@ -47,6 +47,8 @@ class Stage(ABC):
         return formatted
 
     def _update_token_usage(self, sample: dict[str, Any], usage: dict) -> None:
+        if usage is None:
+            return
         if "token_usage" not in sample:
             sample["token_usage"] = {
                 "input_tokens": 0,

@@ -27,9 +27,12 @@ class ExperimentLogger:
         self._fieldnames = fieldnames
 
     def _coerce(self, record: dict[str, Any]) -> dict[str, Any]:
-        """Return a copy with hypothesis_label formatted to int."""
+        """Return a copy with hypothesis_label formatted to int (None passed through as-is)."""
         if "hypothesis_label" in record:
-            record = {**record, "hypothesis_label": int(record["hypothesis_label"])}
+            label = record["hypothesis_label"]
+            if label is not None:
+                label = int(label)
+            record = {**record, "hypothesis_label": label}
         return record
 
     def append(self, record: dict[str, Any]) -> None:

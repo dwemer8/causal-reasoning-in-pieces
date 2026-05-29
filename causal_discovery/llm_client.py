@@ -121,7 +121,13 @@ class OpenAIClient(BaseLLMClient):
                     await asyncio.sleep(0.3)
                 tasks.append(asyncio.create_task(_call(p)))
 
-            return await asyncio.gather(*tasks)
+            return await asyncio.wait_for(
+                asyncio.gather(*tasks),
+                timeout=RETRY_MAX_SECONDS + 60,
+            )
+        except asyncio.TimeoutError:
+            logging.error("Batch call timed out after %.0fs.", RETRY_MAX_SECONDS + 60)
+            return [(None, None)] * len(prompts)
         finally:
             await async_client.close()
 

@@ -5,7 +5,7 @@ declare -A BATCH_SIZES=(
   ["openai/gpt-oss-120b"]=32
   ["deepseek-ai/DeepSeek-V4-Pro"]=32
   ["Qwen/Qwen3.5-397B-A17B-FP8"]=4
-  ["Qwen/Qwen3.6-35B-A3B"]=32
+  ["Qwen/Qwen3.6-35B-A3B"]=4
 )
 
 # Per-model optimal inference parameters.
@@ -18,10 +18,10 @@ declare -A INFERENCE_PARAMS=(
 )
 
 MODELS=(
-  "openai/gpt-oss-120b"
-  "deepseek-ai/DeepSeek-V4-Pro"
-  "Qwen/Qwen3.5-397B-A17B-FP8"
-  "Qwen/Qwen3.6-35B-A3B"
+  # "openai/gpt-oss-120b"
+  # "deepseek-ai/DeepSeek-V4-Pro"  # already completed
+  "Qwen/Qwen3.6-35B-A3B"       # endpoint congested, skip for now
+  # "Qwen/Qwen3.5-397B-A17B-FP8"
 )
 
 for model in "${MODELS[@]}"; do
