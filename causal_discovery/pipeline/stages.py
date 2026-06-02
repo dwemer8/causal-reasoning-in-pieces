@@ -49,6 +49,11 @@ class Stage(ABC):
     def _update_token_usage(self, sample: dict[str, Any], usage: dict) -> None:
         if usage is None:
             return
+        # Accept both CompletionUsage objects and plain dicts
+        input_tokens = usage.get("prompt_tokens", 0) if isinstance(usage, dict) else usage.prompt_tokens
+        output_tokens = usage.get("completion_tokens", 0) if isinstance(usage, dict) else usage.completion_tokens
+        total_tokens = usage.get("total_tokens", 0) if isinstance(usage, dict) else usage.total_tokens
+
         if "token_usage" not in sample:
             sample["token_usage"] = {
                 "input_tokens": 0,
@@ -57,17 +62,17 @@ class Stage(ABC):
                 "per_stage": {}
             }
 
-        sample["token_usage"]["input_tokens"] += usage.prompt_tokens
-        sample["token_usage"]["output_tokens"] += usage.completion_tokens
-        sample["token_usage"]["total_tokens"] += usage.total_tokens
+        sample["token_usage"]["input_tokens"] += input_tokens
+        sample["token_usage"]["output_tokens"] += output_tokens
+        sample["token_usage"]["total_tokens"] += total_tokens
 
         stage_dict = sample["token_usage"]["per_stage"].setdefault(
             self.__class__.__name__,
             {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         )
-        stage_dict["input_tokens"] += usage.prompt_tokens
-        stage_dict["output_tokens"] += usage.completion_tokens
-        stage_dict["total_tokens"] += usage.total_tokens
+        stage_dict["input_tokens"] += input_tokens
+        stage_dict["output_tokens"] += output_tokens
+        stage_dict["total_tokens"] += total_tokens
 
         logging.info(
             f"[{self.__class__.__name__}]   total so far: {sample['token_usage']['per_stage'][self.__class__.__name__]}"

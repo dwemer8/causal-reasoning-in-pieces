@@ -26,29 +26,36 @@ class ExperimentLogger:
             writer.writeheader()
         self._fieldnames = fieldnames
 
+    NON_SCALAR_KEYS = {"token_usage"}
+
     def _coerce(self, record: dict[str, Any]) -> dict[str, Any]:
-        """Return a copy with hypothesis_label formatted to int (None passed through as-is)."""
+        """Return a copy with hypothesis_label formatted to int and non-scalar keys dropped."""
         if "hypothesis_label" in record:
             label = record["hypothesis_label"]
             if label is not None:
                 label = int(label)
             record = {**record, "hypothesis_label": label}
+        # Drop non-scalar keys that cannot be serialized to CSV
+        for key in self.NON_SCALAR_KEYS:
+            record.pop(key, None)
         return record
 
     def append(self, record: dict[str, Any]) -> None:
+        record = self._coerce(record)
         if self._fieldnames is None:
             self._init_header(list(record.keys()))
 
         with self.log_file.open("a", newline="") as f:
-            csv.DictWriter(f, fieldnames=self._fieldnames).writerow(self._coerce(record))
+            csv.DictWriter(f, fieldnames=self._fieldnames).writerow(record)
 
     def append_many(self, records: list[dict[str, Any]]) -> None:
         if not records:
             return
 
+        records = [self._coerce(r) for r in records]
         if self._fieldnames is None:
             self._init_header(list(records[0].keys()))
 
         with self.log_file.open("a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=self._fieldnames)
-            writer.writerows(map(self._coerce, records))
+            writer.writerows(records)

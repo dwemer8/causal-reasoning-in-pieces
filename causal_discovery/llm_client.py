@@ -1,7 +1,9 @@
 import logging
+import multiprocessing
 import os
 import time
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Any
 
 import asyncio
@@ -12,9 +14,29 @@ from openai import OpenAI, AsyncOpenAI
 
 RETRY_MAX_SECONDS = 120
 RETRY_BASE_DELAY = 1.0
+PER_REQUEST_TIMEOUT = 90  # Hard per-API-call timeout via multiprocessing
 
 if TYPE_CHECKING:
     from transformers import Pipeline
+
+
+def _call_api_in_subprocess(result_queue: multiprocessing.Queue,
+                             api_key: str, base_url: str, kwargs: dict) -> None:
+    """Run a single chat.completions.create() call in a subprocess.
+
+    Puts (text, usage_dict) or (None, None) into result_queue.
+    Uses a separate process to guarantee that hung TCP connections can be killed.
+    """
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0, max_retries=0)
+        resp = client.chat.completions.create(**kwargs)
+        usage = {"prompt_tokens": resp.usage.prompt_tokens,
+                 "completion_tokens": resp.usage.completion_tokens,
+                 "total_tokens": resp.usage.total_tokens}
+        result_queue.put((resp.choices[0].message.content, usage))
+    except Exception:
+        result_queue.put((None, None))
 
 
 class BaseLLMClient(ABC):
@@ -60,7 +82,7 @@ class OpenAIClient(BaseLLMClient):
 
     def _build_kwargs(self, messages: list[dict]) -> dict:
         """Build kwargs dict for chat completions, routing non-standard params through extra_body."""
-        kwargs: dict = {"model": self.model_id, "messages": messages}
+        kwargs: dict = {"model": self.model_id, "messages": messages, "max_tokens": 9000}
         if self.temperature is not None:
             kwargs["temperature"] = self.temperature
         if self.top_p is not None:
@@ -90,46 +112,54 @@ class OpenAIClient(BaseLLMClient):
         text = response.choices[0].message.content
         return text, usage
 
-    def complete_batch(self, prompts: list[str]) -> list[str]:
-        return asyncio.run(self._complete_batch_async(prompts))
+    def _call_with_retry(self, prompt: str) -> tuple[Optional[str], Optional[dict]]:
+        """Call the LLM with retry logic. Each API call runs in a subprocess
+        with a hard timeout to guarantee termination of hung TCP connections."""
+        deadline = time.monotonic() + RETRY_MAX_SECONDS
+        delay = RETRY_BASE_DELAY
+        kwargs = self._build_kwargs([{"role": "user", "content": prompt}])
+        while True:
+            try:
+                ctx = multiprocessing.get_context("spawn")
+                queue: multiprocessing.Queue = ctx.Queue()
+                proc = ctx.Process(
+                    target=_call_api_in_subprocess,
+                    args=(queue, self.api_key, self.base_url, kwargs),
+                )
+                proc.start()
+                proc.join(timeout=PER_REQUEST_TIMEOUT)
+                if proc.is_alive():
+                    proc.terminate()
+                    proc.join(timeout=5)
+                    raise TimeoutError(f"API call timed out after {PER_REQUEST_TIMEOUT}s")
+                if not queue.empty():
+                    text, usage = queue.get()
+                    return text, usage
+                raise RuntimeError(f"API subprocess returned no result (exit code {proc.exitcode})")
+            except Exception as e:
+                msg = str(e)[:120]
+                if time.monotonic() >= deadline:
+                    logging.error("LLM call failed after %.0fs retries: %s", RETRY_MAX_SECONDS, msg)
+                    return None, None
+                logging.warning("LLM call failed, retrying in %.1fs: %s", delay, msg)
+                time.sleep(delay)
+                delay = min(delay * 2, 30.0)
 
-    async def _complete_batch_async(self, prompts: list[str]) -> list[tuple[Optional[str], Optional[dict]]]:
-        async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=120.0, max_retries=3)
-        semaphore = asyncio.Semaphore(self.concurrency)
-
-        async def _call(p: str) -> tuple[Optional[str], Optional[dict]]:
-            deadline = time.monotonic() + RETRY_MAX_SECONDS
-            delay = RETRY_BASE_DELAY
-            while True:
+    def complete_batch(self, prompts: list[str]) -> list[tuple[Optional[str], Optional[dict]]]:
+        """Run batch of prompts concurrently using thread pool."""
+        with ThreadPoolExecutor(max_workers=self.concurrency) as executor:
+            futures = {executor.submit(self._call_with_retry, p): i for i, p in enumerate(prompts)}
+            results = [None] * len(prompts)
+            for future in as_completed(futures):
+                idx = futures[future]
                 try:
-                    async with semaphore:
-                        kwargs = self._build_kwargs([{"role": "user", "content": p}])
-                        resp = await async_client.chat.completions.create(**kwargs)
-                    return resp.choices[0].message.content, resp.usage
+                    # Each _call_with_retry has its own 120s deadline,
+                    # so 240s outer timeout is a generous safety net.
+                    results[idx] = future.result(timeout=RETRY_MAX_SECONDS + 120)
                 except Exception as e:
-                    if time.monotonic() >= deadline:
-                        logging.error("LLM call failed after %.0fs retries: %s", RETRY_MAX_SECONDS, e)
-                        return None, None
-                    logging.warning("LLM call failed, retrying in %.1fs: %s", delay, e)
-                    await asyncio.sleep(delay)
-                    delay = min(delay * 2, 30.0)
-
-        try:
-            tasks = []
-            for i, p in enumerate(prompts):
-                if i > 0:
-                    await asyncio.sleep(0.3)
-                tasks.append(asyncio.create_task(_call(p)))
-
-            return await asyncio.wait_for(
-                asyncio.gather(*tasks),
-                timeout=RETRY_MAX_SECONDS + 60,
-            )
-        except asyncio.TimeoutError:
-            logging.error("Batch call timed out after %.0fs.", RETRY_MAX_SECONDS + 60)
-            return [(None, None)] * len(prompts)
-        finally:
-            await async_client.close()
+                    logging.error("Thread for prompt %d failed: %s", idx, e)
+                    results[idx] = (None, None)
+        return results
 
 
 class HuggingFaceClient(BaseLLMClient):
@@ -217,8 +247,8 @@ class HuggingFaceClient(BaseLLMClient):
 
 class DeepSeekClient(BaseLLMClient):
     """
-    Async DeepSeek client using AsyncOpenAI under the hood but exposes
-    the sync interface for compatibility with a pipeline.
+    Sync DeepSeek client using OpenAI client with thread-pool for batch calls.
+    Uses OS-level TCP timeouts for reliable connection handling.
     """
     def __init__(self, concurrency: int = 30, model_id: str = "deepseek-reasoner", base_url: str = "https://api.deepseek.com", temperature: float | None = None, top_p: float | None = None, top_k: int | None = None, min_p: float | None = None, presence_penalty: float | None = None, repetition_penalty: float | None = None):
         load_dotenv()
@@ -236,9 +266,11 @@ class DeepSeekClient(BaseLLMClient):
         self.presence_penalty = presence_penalty
         self.repetition_penalty = repetition_penalty
 
+        self.client: OpenAI = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0, max_retries=3)
+
     def _build_kwargs(self, messages: list[dict]) -> dict:
         """Build kwargs dict for chat completions, routing non-standard params through extra_body."""
-        kwargs: dict = {"model": self.model_id, "messages": messages, "stream": False}
+        kwargs: dict = {"model": self.model_id, "messages": messages, "stream": False, "max_tokens": 9000}
         if self.temperature is not None:
             kwargs["temperature"] = self.temperature
         if self.top_p is not None:
@@ -259,59 +291,54 @@ class DeepSeekClient(BaseLLMClient):
         return kwargs
 
     def complete(self, prompt: str) -> tuple[str, Any]:
-        """
-        Single-prompt call: wraps the async call in asyncio.run
-        Returns (response_text, usage)
-        """
-        return asyncio.run(self._complete_async(prompt))
+        """Single-prompt call using the sync client."""
+        kwargs = self._build_kwargs([{"role": "user", "content": prompt}])
+        resp = self.client.chat.completions.create(**kwargs)
+        return resp.choices[0].message.content, resp.usage
 
-    async def _complete_async(self, prompt: str) -> tuple[str, Any]:
-        async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
-        try:
-            kwargs = self._build_kwargs([{"role": "user", "content": prompt}])
-            resp = await async_client.chat.completions.create(**kwargs)
-            usage = resp.usage
-            text = resp.choices[0].message.content
-            return text, usage
-        finally:
-            await async_client.close()
+    def _call_with_retry(self, prompt: str) -> tuple[Optional[str], Optional[dict]]:
+        """Call the LLM with retry logic. Each API call runs in a subprocess
+        with a hard timeout to guarantee termination of hung TCP connections."""
+        deadline = time.monotonic() + RETRY_MAX_SECONDS
+        delay = RETRY_BASE_DELAY
+        kwargs = self._build_kwargs([{"role": "user", "content": prompt}])
+        while True:
+            try:
+                ctx = multiprocessing.get_context("spawn")
+                queue: multiprocessing.Queue = ctx.Queue()
+                proc = ctx.Process(
+                    target=_call_api_in_subprocess,
+                    args=(queue, self.api_key, self.base_url, kwargs),
+                )
+                proc.start()
+                proc.join(timeout=PER_REQUEST_TIMEOUT)
+                if proc.is_alive():
+                    proc.terminate()
+                    proc.join(timeout=5)
+                    raise TimeoutError(f"API call timed out after {PER_REQUEST_TIMEOUT}s")
+                if not queue.empty():
+                    text, usage = queue.get()
+                    return text, usage
+                raise RuntimeError(f"API subprocess returned no result (exit code {proc.exitcode})")
+            except Exception as e:
+                msg = str(e)[:120]
+                if time.monotonic() >= deadline:
+                    logging.error("LLM call failed after %.0fs retries: %s", RETRY_MAX_SECONDS, msg)
+                    return None, None
+                logging.warning("LLM call failed, retrying in %.1fs: %s", delay, msg)
+                time.sleep(delay)
+                delay = min(delay * 2, 30.0)
 
     def complete_batch(self, prompts: list[str]) -> list[tuple[str, Any]]:
-        """
-        Batch call: runs all prompts concurrently within a single event loop
-        Returns a list of (response_text, usage) tuples
-        """
-        return asyncio.run(self._complete_batch_async(prompts))
-
-    async def _complete_batch_async(self, prompts: list[str]) -> list[tuple[str, Any]]:
-        async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
-        semaphore = asyncio.Semaphore(self.concurrency)
-
-        async def _call(p: str) -> tuple[str, Any]:
-            deadline = time.monotonic() + RETRY_MAX_SECONDS
-            delay = RETRY_BASE_DELAY
-            while True:
+        """Batch call using thread pool with the sync client."""
+        with ThreadPoolExecutor(max_workers=self.concurrency) as executor:
+            futures = {executor.submit(self._call_with_retry, p): i for i, p in enumerate(prompts)}
+            results = [None] * len(prompts)
+            for future in as_completed(futures):
+                idx = futures[future]
                 try:
-                    async with semaphore:
-                        kwargs = self._build_kwargs([{"role": "user", "content": p}])
-                        resp = await async_client.chat.completions.create(**kwargs)
-                    text = resp.choices[0].message.content
-                    usage = resp.usage
-                    return text, usage
+                    results[idx] = future.result(timeout=RETRY_MAX_SECONDS + 120)
                 except Exception as e:
-                    if time.monotonic() >= deadline:
-                        logging.error("LLM call failed after %.0fs retries: %s", RETRY_MAX_SECONDS, e)
-                        return None, None
-                    logging.warning("LLM call failed, retrying in %.1fs: %s", delay, e)
-                    await asyncio.sleep(delay)
-                    delay = min(delay * 2, 30.0)
-
-        try:
-            tasks = []
-            for i, p in enumerate(prompts):
-                if i > 0:
-                    await asyncio.sleep(0.3)
-                tasks.append(asyncio.create_task(_call(p)))
-            return await asyncio.gather(*tasks)
-        finally:
-            await async_client.close()
+                    logging.error("Thread for prompt %d failed: %s", idx, e)
+                    results[idx] = (None, None)
+        return results
