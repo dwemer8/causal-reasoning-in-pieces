@@ -21,6 +21,7 @@ indices
 
 .claude
 CLAUDE.md
+.worktreeinclude
 
 *.pdf
 junk/
