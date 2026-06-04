@@ -64,6 +64,14 @@ def parse_arguments() -> argparse.Namespace:
         help="Number of experiments to run. If greater than dataset length, the whole test set will be used.",
     )
     parser.add_argument(
+        "--indexes",
+        type=int,
+        nargs=2,
+        metavar=("MIN_IDX", "MAX_IDX"),
+        default=None,
+        help="Evaluate only rows in range [MIN_IDX, MAX_IDX] (both inclusive, positional iloc indexing).",
+    )
+    parser.add_argument(
         "--batch_size",
         type=int,
         default=64,
@@ -134,15 +142,28 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def load_dataset(args: argparse.Namespace) -> pd.DataFrame:
+    """Load the dataset CSV and optionally filter by positional index range.
+
+    Args:
+        args: Parsed command-line arguments. Uses args.input_file and args.indexes.
+
+    Returns:
+        pd.DataFrame with the loaded (and optionally filtered) data.
+    """
     csv_file = args.input_file
     df = pd.read_csv(csv_file)
+    if args.indexes is not None:
+        min_idx, max_idx = args.indexes
+        df = df.iloc[min_idx:max_idx + 1]
+        logging.info(f"Filtered to rows [{min_idx}, {max_idx}] — {len(df)} rows remaining.")
     logging.info(f"Loaded dataset from {csv_file} with {len(df)} rows.")
     return df
 
 
 def prepare_input_samples(df: pd.DataFrame, num_experiments: int) -> list[dict]:
     num_experiments = min(num_experiments, len(df))
-    sampled_df = df.sample(n=num_experiments, replace=False)
+    # sampled_df = df.sample(n=num_experiments, replace=False) #when using min_idx and max_idx we want linear execution
+    sampled_df = df.iloc[0:num_experiments]
 
     input_samples = []
     for idx, row in sampled_df.iterrows():
