@@ -1,45 +1,51 @@
 #!/bin/bash
 set -e
 
-declare -A BATCH_SIZES=(
-  ["openai/gpt-oss-120b"]=32
-  ["deepseek-ai/DeepSeek-V4-Pro"]=32
-  ["Qwen/Qwen3.5-397B-A17B-FP8"]=1
-  ["Qwen/Qwen3.6-35B-A3B"]=1
-)
+# Evaluate DeepSeek V4 Pro on full test dataset with thinking mode.
+# Two runs: reasoning_effort=high and reasoning_effort=max.
+# Results saved to causal_discovery/logs/benchmarks.tsv.
 
-# Per-model optimal inference parameters.
-# Models without specific optimal params use existing defaults (temperature=1.0, top_p=1.0).
-declare -A INFERENCE_PARAMS=(
-  ["openai/gpt-oss-120b"]="--temperature 1.0 --top_p 1.0"
-  ["deepseek-ai/DeepSeek-V4-Pro"]="--temperature 1.0 --top_p 1.0"
-  ["Qwen/Qwen3.5-397B-A17B-FP8"]="--temperature 0.6 --top_p 0.95 --top_k 20 --min_p 0.0 --presence_penalty 0.0 --repetition_penalty 1.0"
-  ["Qwen/Qwen3.6-35B-A3B"]="--temperature 0.6 --top_p 0.95 --top_k 20 --min_p 0.0 --presence_penalty 0.0 --repetition_penalty 1.0"
-)
-
-MODELS=(
-  # "openai/gpt-oss-120b"
-  # "deepseek-ai/DeepSeek-V4-Pro"  # already completed
-  "Qwen/Qwen3.6-35B-A3B"
-  "Qwen/Qwen3.5-397B-A17B-FP8"
-)
-
-for model in "${MODELS[@]}"; do
-  batch_size="${BATCH_SIZES[$model]}"
-  params="${INFERENCE_PARAMS[$model]}"
-  echo ""
-  echo "=== Running $model (batch_size=$batch_size) ==="
-  PYTHONPATH="." .venv/bin/python causal_discovery/main.py \
-    --backend openai \
-    --model "$model" \
-    --api-base "https://llm-chat.sk.appliedai.ru/api" \
-    --input_file "data/test_dataset.csv" \
-    --mode batched \
-    --batch_size "$batch_size" \
-    --num_experiments 1200 \
-    $params
-  echo "=== Done $model ==="
-done
+MODEL="deepseek-ai/DeepSeek-V4-Pro"
+API_BASE="https://llm-chat.sk.appliedai.ru/api"
+INPUT_FILE="data/test_dataset.csv"
+BATCH_SIZE=32
+VENV_PYTHON="/home/d.kornilov/work/causal_discovery/agents/causal-reasoning-in-pieces/.venv/bin/python"
 
 echo ""
-echo "All models completed."
+echo "============================================================"
+echo "RUN 1: thinking=true, reasoning_effort=high, T=0.1"
+echo "============================================================"
+PYTHONPATH="." $VENV_PYTHON causal_discovery/main.py \
+  --backend openai \
+  --model "$MODEL" \
+  --api-base "$API_BASE" \
+  --input_file "$INPUT_FILE" \
+  --mode batched \
+  --batch_size "$BATCH_SIZE" \
+  --num_experiments 1200 \
+  --temperature 0.1 \
+  --top_p 1.0 \
+  --thinking \
+  --reasoning_effort high
+echo "=== Done high ==="
+
+echo ""
+echo "============================================================"
+echo "RUN 2: thinking=true, reasoning_effort=max, T=0.1"
+echo "============================================================"
+PYTHONPATH="." $VENV_PYTHON causal_discovery/main.py \
+  --backend openai \
+  --model "$MODEL" \
+  --api-base "$API_BASE" \
+  --input_file "$INPUT_FILE" \
+  --mode batched \
+  --batch_size "$BATCH_SIZE" \
+  --num_experiments 1200 \
+  --temperature 0.1 \
+  --top_p 1.0 \
+  --thinking \
+  --reasoning_effort max
+echo "=== Done max ==="
+
+echo ""
+echo "All evaluations completed."

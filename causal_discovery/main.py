@@ -104,6 +104,19 @@ def parse_arguments() -> argparse.Namespace:
         default=None,
         help="Repetition penalty for the LLM. If not set, uses backend default.",
     )
+    parser.add_argument(
+        "--reasoning_effort",
+        type=str,
+        default=None,
+        choices=["high", "max"],
+        help="Reasoning effort level for thinking mode (high or max).",
+    )
+    parser.add_argument(
+        "--thinking",
+        action="store_true",
+        default=False,
+        help="Enable thinking mode via chat_template_kwargs.",
+    )
     return parser.parse_args()
 
 
@@ -141,9 +154,11 @@ def create_client(backend: str, batch_size: int, model: str, api_base: str | Non
                   temperature: float | None = None, top_p: float | None = None,
                   top_k: int | None = None, min_p: float | None = None,
                   presence_penalty: float | None = None,
-                  repetition_penalty: float | None = None) -> BaseLLMClient:
+                  repetition_penalty: float | None = None,
+                  reasoning_effort: str | None = None,
+                  thinking: bool = False) -> BaseLLMClient:
     if backend == "openai":
-        client = OpenAIClient(model_id=model, concurrency=batch_size, base_url=api_base, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p, presence_penalty=presence_penalty, repetition_penalty=repetition_penalty)
+        client = OpenAIClient(model_id=model, concurrency=batch_size, base_url=api_base, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p, presence_penalty=presence_penalty, repetition_penalty=repetition_penalty, reasoning_effort=reasoning_effort, thinking=thinking)
     elif backend == "huggingface":
         client = HuggingFaceClient(max_new_tokens=8192, batch_size=batch_size, model_id=model, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p, presence_penalty=presence_penalty, repetition_penalty=repetition_penalty)
     else:
@@ -155,7 +170,9 @@ def create_client(backend: str, batch_size: int, model: str, api_base: str | Non
 def post_process_logs(log_file: str, model: str, temperature: float, top_p: float,
                       top_k: int = None, min_p: float = None,
                       presence_penalty: float = None,
-                      repetition_penalty: float = None) -> None:
+                      repetition_penalty: float = None,
+                      reasoning_effort: str = None,
+                      thinking: bool = False) -> None:
     """
     Read the log CSV file, compute confusion matrix and performance metrics,
     then print them out and append a row to the benchmarks TSV file.
@@ -202,6 +219,8 @@ def post_process_logs(log_file: str, model: str, temperature: float, top_p: floa
         "min_p": f"{min_p}",
         "presence_penalty": f"{presence_penalty}",
         "repetition_penalty": f"{repetition_penalty}",
+        "reasoning_effort": f"{reasoning_effort}",
+        "thinking": f"{thinking}",
         "accuracy": f"{accuracy:.4f}",
         "precision": f"{precision:.4f}",
         "recall": f"{recall:.4f}",
@@ -233,7 +252,7 @@ def main() -> None:
     input_samples = prepare_input_samples(df, args.num_experiments)
 
     # Create the LLM client based on backend choice.
-    client = create_client(args.backend, args.batch_size, args.model, args.api_base, args.temperature, args.top_p, args.top_k, args.min_p, args.presence_penalty, args.repetition_penalty)
+    client = create_client(args.backend, args.batch_size, args.model, args.api_base, args.temperature, args.top_p, args.top_k, args.min_p, args.presence_penalty, args.repetition_penalty, args.reasoning_effort, args.thinking)
     # tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Llama-70B")
 
     # Prepare the pipeline
@@ -271,7 +290,7 @@ def main() -> None:
     logging.info(f"Total execution time: {end_time - start_time:.2f} seconds")
 
     # Run results post-processing.
-    post_process_logs(str(logger.log_file), args.model, args.temperature, args.top_p, args.top_k, args.min_p, args.presence_penalty, args.repetition_penalty)
+    post_process_logs(str(logger.log_file), args.model, args.temperature, args.top_p, args.top_k, args.min_p, args.presence_penalty, args.repetition_penalty, args.reasoning_effort, args.thinking)
 
     if failed_ids:
         logging.info(f"Total failed experiments after max retries: {len(failed_ids)}")
