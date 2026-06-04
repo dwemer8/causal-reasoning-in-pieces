@@ -20,8 +20,9 @@ backup.py
 indices
 
 .claude
-CLAUDE.md
 .worktreeinclude
+CLAUDE.md
+standards/
 
 *.pdf
 junk/
