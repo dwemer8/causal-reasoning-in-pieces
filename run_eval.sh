@@ -24,7 +24,6 @@ PYTHONPATH="." $VENV_PYTHON causal_discovery/main.py \
   --batch_size "$BATCH_SIZE" \
   --num_experiments 1200 \
   --temperature 0.1 \
-  --top_p 1.0 \
   --thinking \
   --reasoning_effort high
 echo "=== Done high ==="
@@ -42,7 +41,6 @@ PYTHONPATH="." $VENV_PYTHON causal_discovery/main.py \
   --batch_size "$BATCH_SIZE" \
   --num_experiments 1200 \
   --temperature 0.1 \
-  --top_p 1.0 \
   --thinking \
   --reasoning_effort max
 echo "=== Done max ==="
