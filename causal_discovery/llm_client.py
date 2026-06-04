@@ -14,7 +14,7 @@ from openai import OpenAI, AsyncOpenAI
 
 RETRY_MAX_SECONDS = 120
 RETRY_BASE_DELAY = 1.0
-PER_REQUEST_TIMEOUT = 90  # Hard per-API-call timeout via multiprocessing
+PER_REQUEST_TIMEOUT = 600  # Hard per-API-call timeout via multiprocessing (higher for thinking mode)
 
 if TYPE_CHECKING:
     from transformers import Pipeline
@@ -29,7 +29,7 @@ def _call_api_in_subprocess(result_queue: multiprocessing.Queue,
     """
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0, max_retries=0)
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=600.0, max_retries=0)
         resp = client.chat.completions.create(**kwargs)
         usage = {"prompt_tokens": resp.usage.prompt_tokens,
                  "completion_tokens": resp.usage.completion_tokens,
@@ -57,16 +57,19 @@ class BaseLLMClient(ABC):
 
 
 class OpenAIClient(BaseLLMClient):
-    def __init__(self, model_id: str = "o3-mini", concurrency: int = 30, base_url: str | None = None, temperature: float | None = None, top_p: float | None = None, top_k: int | None = None, min_p: float | None = None, presence_penalty: float | None = None, repetition_penalty: float | None = None) -> None:
+    def __init__(self, model_id: str = "o3-mini", concurrency: int = 30, base_url: str | None = None, temperature: float | None = None, top_p: float | None = None, top_k: int | None = None, min_p: float | None = None, presence_penalty: float | None = None, repetition_penalty: float | None = None, reasoning_effort: str | None = None, thinking: bool = False) -> None:
         """
         Initialize the OpenAI LLMClient with an API key from environment variables.
+
+        :param reasoning_effort: Reasoning effort level for thinking mode (\"high\" or \"max\"). None disables.
+        :param thinking: Whether to enable thinking mode via chat_template_kwargs.
         """
         load_dotenv()
         api_key = os.getenv('OPENAI_API_KEY')
         if not api_key:
             raise ValueError("API key not found. Please set the OPENAI_API_KEY environment variable.")
 
-        self.client: OpenAI = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0, max_retries=3)
+        self.client: OpenAI = OpenAI(api_key=api_key, base_url=base_url, timeout=600.0, max_retries=3)
         self.api_key = api_key
         self.base_url = base_url
         logging.info(f"Loaded OpenAI model: {model_id}")
@@ -79,16 +82,26 @@ class OpenAIClient(BaseLLMClient):
         self.min_p = min_p
         self.presence_penalty = presence_penalty
         self.repetition_penalty = repetition_penalty
+        self.reasoning_effort = reasoning_effort
+        self.thinking = thinking
 
     def _build_kwargs(self, messages: list[dict]) -> dict:
         """Build kwargs dict for chat completions, routing non-standard params through extra_body."""
-        kwargs: dict = {"model": self.model_id, "messages": messages, "max_tokens": 9000}
+        kwargs: dict = {"model": self.model_id, "messages": messages}
+        # When thinking mode is enabled, don't set max_tokens to avoid truncation.
+        # The model's reasoning_content counts against max_tokens, so even 32K can
+        # be exhausted by reasoning alone for complex prompts (10+ variables).
+        # The model's default max output is 384K, which is sufficient.
+        if not self.thinking:
+            kwargs["max_tokens"] = 9000
         if self.temperature is not None:
             kwargs["temperature"] = self.temperature
         if self.top_p is not None:
             kwargs["top_p"] = self.top_p
         if self.presence_penalty is not None:
             kwargs["presence_penalty"] = self.presence_penalty
+        if self.reasoning_effort is not None:
+            kwargs["reasoning_effort"] = self.reasoning_effort
 
         extra_body: dict = {}
         if self.top_k is not None:
@@ -97,6 +110,8 @@ class OpenAIClient(BaseLLMClient):
             extra_body["min_p"] = self.min_p
         if self.repetition_penalty is not None:
             extra_body["repetition_penalty"] = self.repetition_penalty
+        if self.thinking:
+            extra_body["chat_template_kwargs"] = {"thinking": True}
         if extra_body:
             kwargs["extra_body"] = extra_body
 
