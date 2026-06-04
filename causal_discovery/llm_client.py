@@ -12,8 +12,9 @@ from typing import TYPE_CHECKING
 from dotenv import load_dotenv
 from openai import OpenAI, AsyncOpenAI
 
-RETRY_MAX_SECONDS = 120
+RETRY_MAX_SECONDS = 3600
 RETRY_BASE_DELAY = 1.0
+RETRY_MAX_DELAY = 30.0
 PER_REQUEST_TIMEOUT = 1800  # Hard per-API-call timeout via multiprocessing (30 min for long-thinking models)
 
 if TYPE_CHECKING:
@@ -57,7 +58,22 @@ class BaseLLMClient(ABC):
 
 
 class OpenAIClient(BaseLLMClient):
-    def __init__(self, model_id: str = "o3-mini", concurrency: int = 30, base_url: str | None = None, temperature: float | None = None, top_p: float | None = None, top_k: int | None = None, min_p: float | None = None, presence_penalty: float | None = None, repetition_penalty: float | None = None, reasoning_effort: str | None = None, thinking: bool = False, max_tokens: int | None = None, timeout: float = 1800.0) -> None:
+    def __init__(
+        self, 
+        model_id: str = "o3-mini", 
+        concurrency: int = 30, 
+        base_url: str | None = None, 
+        temperature: float | None = None, 
+        top_p: float | None = None, 
+        top_k: int | None = None, 
+        min_p: float | None = None, 
+        presence_penalty: float | None = None, 
+        repetition_penalty: float | None = None, 
+        reasoning_effort: str | None = None, 
+        thinking: bool = False, 
+        max_tokens: int | None = None, 
+        timeout: float = 1800.0
+    ) -> None:
         """
         Initialize the OpenAI LLMClient with an API key from environment variables.
 
@@ -158,7 +174,7 @@ class OpenAIClient(BaseLLMClient):
                     return None, None
                 logging.warning("LLM call failed, retrying in %.1fs: %s", delay, msg)
                 time.sleep(delay)
-                delay = min(delay * 2, 30.0)
+                delay = min(delay * 2, RETRY_MAX_DELAY)
 
     def complete_batch(self, prompts: list[str]) -> list[tuple[Optional[str], Optional[dict]]]:
         """Run batch of prompts concurrently using thread pool."""
@@ -168,8 +184,6 @@ class OpenAIClient(BaseLLMClient):
             for future in as_completed(futures):
                 idx = futures[future]
                 try:
-                    # Each _call_with_retry has its own 120s deadline,
-                    # so 240s outer timeout is a generous safety net.
                     results[idx] = future.result(timeout=RETRY_MAX_SECONDS + 120)
                 except Exception as e:
                     logging.error("Thread for prompt %d failed: %s", idx, e)
