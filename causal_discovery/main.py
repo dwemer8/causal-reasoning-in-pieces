@@ -195,23 +195,81 @@ def create_client(backend: str, batch_size: int, model: str, api_base: str | Non
     return client
 
 
+def _compute_mean_token_usage(results: list[dict]) -> dict[str, float]:
+    """
+    Compute mean token usage across all experiment results.
+
+    Args:
+        results: List of result dicts from pipeline execution, each potentially
+                 containing a "token_usage" key.
+
+    Returns:
+        Dict with mean_input_tokens, mean_output_tokens, mean_total_tokens.
+        Returns zeros if no token usage data is available.
+    """
+    input_tokens = []
+    output_tokens = []
+    total_tokens = []
+
+    for r in results:
+        tu = r.get("token_usage")
+        if tu and isinstance(tu, dict):
+            input_tokens.append(tu.get("input_tokens", 0))
+            output_tokens.append(tu.get("output_tokens", 0))
+            total_tokens.append(tu.get("total_tokens", 0))
+
+    n = len(results)
+    if n == 0:
+        return {
+            "mean_input_tokens": 0.0,
+            "mean_output_tokens": 0.0,
+            "mean_total_tokens": 0.0,
+        }
+
+    return {
+        "mean_input_tokens": sum(input_tokens) / n if input_tokens else 0.0,
+        "mean_output_tokens": sum(output_tokens) / n if output_tokens else 0.0,
+        "mean_total_tokens": sum(total_tokens) / n if total_tokens else 0.0,
+    }
+
+
 def post_process_logs(
-    log_file: str, 
-    model: str, 
-    temperature: float, 
+    log_file: str,
+    model: str,
+    temperature: float,
     top_p: float,
-    top_k: int = None, 
+    top_k: int = None,
     min_p: float = None,
     presence_penalty: float = None,
     repetition_penalty: float = None,
     reasoning_effort: str = None,
     thinking: bool = False,
     max_tokens: int = None,
-    timeout: float = DEFAULT_TIMEOUT
+    timeout: float = DEFAULT_TIMEOUT,
+    mean_input_tokens: float = 0.0,
+    mean_output_tokens: float = 0.0,
+    mean_total_tokens: float = 0.0,
 ) -> None:
     """
     Read the log CSV file, compute confusion matrix and performance metrics,
     then print them out and append a row to the benchmarks TSV file.
+
+    Args:
+        log_file: Path to the experiment log CSV file.
+        model: Model ID used for the experiment.
+        temperature: Sampling temperature.
+        top_p: Top-p (nucleus) sampling parameter.
+        top_k: Top-k sampling parameter.
+        min_p: Min-p sampling parameter.
+        presence_penalty: Presence penalty for the LLM.
+        repetition_penalty: Repetition penalty for the LLM.
+        reasoning_effort: Reasoning effort level.
+        thinking: Whether thinking mode was enabled.
+        max_tokens: Maximum tokens for completion.
+        timeout: HTTP timeout in seconds.
+        mean_input_tokens: Mean input tokens per sample across all stages.
+        mean_output_tokens: Mean output tokens per sample across all stages.
+        mean_total_tokens: Mean total tokens per sample across all stages.
     """
     df = pd.read_csv(log_file)
     n_nulls = df["hypothesis_label"].isnull().sum()
@@ -269,6 +327,9 @@ def post_process_logs(
         "fn": fn,
         "total": total,
         "n_nulls": n_nulls,
+        "mean_input_tokens": f"{mean_input_tokens:.1f}",
+        "mean_output_tokens": f"{mean_output_tokens:.1f}",
+        "mean_total_tokens": f"{mean_total_tokens:.1f}",
     }])
     BENCHMARKS_FILE.parent.mkdir(parents=True, exist_ok=True)
     if BENCHMARKS_FILE.exists():
@@ -342,20 +403,26 @@ def main() -> None:
     end_time = time.time()
     logging.info(f"Total execution time: {end_time - start_time:.2f} seconds")
 
+    # Compute mean token usage from in-memory results.
+    mean_tokens = _compute_mean_token_usage(results)
+
     # Run results post-processing.
     post_process_logs(
-        str(logger.log_file), 
-        args.model, 
-        args.temperature, 
-        args.top_p, 
-        args.top_k, 
-        args.min_p, 
-        args.presence_penalty, 
-        args.repetition_penalty, 
-        args.reasoning_effort, 
-        args.thinking, 
-        args.max_tokens, 
-        args.timeout
+        str(logger.log_file),
+        args.model,
+        args.temperature,
+        args.top_p,
+        args.top_k,
+        args.min_p,
+        args.presence_penalty,
+        args.repetition_penalty,
+        args.reasoning_effort,
+        args.thinking,
+        args.max_tokens,
+        args.timeout,
+        mean_input_tokens=mean_tokens["mean_input_tokens"],
+        mean_output_tokens=mean_tokens["mean_output_tokens"],
+        mean_total_tokens=mean_tokens["mean_total_tokens"],
     )
 
     if failed_ids:
