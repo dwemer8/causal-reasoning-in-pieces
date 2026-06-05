@@ -4,6 +4,58 @@ from pathlib import Path
 from typing import Optional, Any
 
 
+# Known pipeline stage class names for per-stage token usage flattening.
+# These map stage class names to shorter column prefixes.
+_STAGE_COLUMN_PREFIXES: dict[str, str] = {
+    "UndirectedSkeletonStage": "undirected_skeleton",
+    "VStructuresStage": "v_structures",
+    "MeekRulesStage": "meek_rules",
+    "HypothesisEvaluationStage": "hypothesis_evaluation",
+}
+
+
+def _flatten_token_usage(record: dict[str, Any]) -> dict[str, Any]:
+    """
+    Flatten the nested ``token_usage`` dict into scalar columns.
+
+    Transforms::
+
+        {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "total_tokens": 150,
+            "per_stage": {
+                "UndirectedSkeletonStage": {"input_tokens": 60, "output_tokens": 30, "total_tokens": 90},
+                ...
+            }
+        }
+
+    into flat columns like ``input_tokens``, ``output_tokens``, ``total_tokens``,
+    ``undirected_skeleton_input_tokens``, ``undirected_skeleton_output_tokens``,
+    ``undirected_skeleton_total_tokens``, etc.
+    """
+    tu = record.pop("token_usage", None)
+    if not tu or not isinstance(tu, dict):
+        return record
+
+    # Top-level totals
+    record["input_tokens"] = tu.get("input_tokens", 0)
+    record["output_tokens"] = tu.get("output_tokens", 0)
+    record["total_tokens"] = tu.get("total_tokens", 0)
+
+    # Per-stage breakdown
+    per_stage = tu.get("per_stage", {})
+    if isinstance(per_stage, dict):
+        for stage_name, stage_tokens in per_stage.items():
+            prefix = _STAGE_COLUMN_PREFIXES.get(stage_name, stage_name.lower())
+            if isinstance(stage_tokens, dict):
+                record[f"{prefix}_input_tokens"] = stage_tokens.get("input_tokens", 0)
+                record[f"{prefix}_output_tokens"] = stage_tokens.get("output_tokens", 0)
+                record[f"{prefix}_total_tokens"] = stage_tokens.get("total_tokens", 0)
+
+    return record
+
+
 class ExperimentLogger:
     """
     Create logging CSV file up‑front and append rows to it as each experiment finishes.
@@ -26,18 +78,15 @@ class ExperimentLogger:
             writer.writeheader()
         self._fieldnames = fieldnames
 
-    NON_SCALAR_KEYS = {"token_usage"}
-
     def _coerce(self, record: dict[str, Any]) -> dict[str, Any]:
-        """Return a copy with hypothesis_label formatted to int and non-scalar keys dropped."""
+        """Return a copy with hypothesis_label formatted to int and token_usage flattened."""
         if "hypothesis_label" in record:
             label = record["hypothesis_label"]
             if label is not None:
                 label = int(label)
             record = {**record, "hypothesis_label": label}
-        # Drop non-scalar keys that cannot be serialized to CSV
-        for key in self.NON_SCALAR_KEYS:
-            record.pop(key, None)
+        # Flatten nested token_usage into scalar columns before CSV serialization
+        record = _flatten_token_usage(record)
         return record
 
     def append(self, record: dict[str, Any]) -> None:
