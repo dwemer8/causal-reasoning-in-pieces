@@ -217,18 +217,20 @@ def create_client(backend: str, batch_size: int, model: str, api_base: str | Non
 
 
 def post_process_logs(
-    log_file: str, 
-    model: str, 
-    temperature: float, 
+    log_file: str,
+    model: str,
+    temperature: float,
     top_p: float,
-    top_k: int = None, 
+    top_k: int = None,
     min_p: float = None,
     presence_penalty: float = None,
     repetition_penalty: float = None,
     reasoning_effort: str = None,
     thinking: bool = False,
     max_tokens: int = None,
-    timeout: float = DEFAULT_TIMEOUT
+    timeout: float = DEFAULT_TIMEOUT,
+    min_idx: int = None,
+    max_idx: int = None
 ) -> None:
     """
     Read the log CSV file, compute confusion matrix and performance metrics,
@@ -266,6 +268,7 @@ def post_process_logs(
     print(f"F1 Score:  {f1:.4f}")
 
     # Append benchmark row to TSV.
+    logs_path = Path(log_file).name
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     new_row = pd.DataFrame([{
         "model": model,
@@ -280,6 +283,9 @@ def post_process_logs(
         "thinking": f"{thinking}",
         "max_tokens": f"{max_tokens}",
         "timeout": f"{timeout}",
+        "min_idx": f"{min_idx}",
+        "max_idx": f"{max_idx}",
+        "logs_path": logs_path,
         "accuracy": f"{accuracy:.4f}",
         "precision": f"{precision:.4f}",
         "recall": f"{recall:.4f}",
@@ -364,19 +370,22 @@ def main() -> None:
     logging.info(f"Total execution time: {end_time - start_time:.2f} seconds")
 
     # Run results post-processing.
+    min_idx, max_idx = args.indexes if args.indexes is not None else (None, None)
     post_process_logs(
-        str(logger.log_file), 
-        args.model, 
-        args.temperature, 
-        args.top_p, 
-        args.top_k, 
-        args.min_p, 
-        args.presence_penalty, 
-        args.repetition_penalty, 
-        args.reasoning_effort, 
-        args.thinking, 
-        args.max_tokens, 
-        args.timeout
+        str(logger.log_file),
+        args.model,
+        args.temperature,
+        args.top_p,
+        args.top_k,
+        args.min_p,
+        args.presence_penalty,
+        args.repetition_penalty,
+        args.reasoning_effort,
+        args.thinking,
+        args.max_tokens,
+        args.timeout,
+        min_idx=min_idx,
+        max_idx=max_idx
     )
 
     if failed_ids:
