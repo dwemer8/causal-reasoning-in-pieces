@@ -117,8 +117,8 @@ def parse_arguments() -> argparse.Namespace:
         "--reasoning_effort",
         type=str,
         default=None,
-        choices=["high", "max"],
-        help="Reasoning effort level for thinking mode (high or max).",
+        choices=["low", "medium", "high", "max"],
+        help="Reasoning effort level for thinking mode (low, medium, high, or max).",
     )
     parser.add_argument(
         "--thinking",
