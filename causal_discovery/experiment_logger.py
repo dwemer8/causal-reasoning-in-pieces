@@ -31,8 +31,8 @@ def _flatten_token_usage(record: dict[str, Any]) -> dict[str, Any]:
         }
 
     into flat columns like ``input_tokens``, ``output_tokens``, ``total_tokens``,
-    ``undirected_skeleton_input_tokens``, ``undirected_skeleton_output_tokens``,
-    ``undirected_skeleton_total_tokens``, etc.
+    ``undirected_skeleton.input_tokens``, ``undirected_skeleton.output_tokens``,
+    ``undirected_skeleton.total_tokens``, etc.
     """
     tu = record.pop("token_usage", None)
     if not tu or not isinstance(tu, dict):
@@ -49,9 +49,9 @@ def _flatten_token_usage(record: dict[str, Any]) -> dict[str, Any]:
         for stage_name, stage_tokens in per_stage.items():
             prefix = _STAGE_COLUMN_PREFIXES.get(stage_name, stage_name.lower())
             if isinstance(stage_tokens, dict):
-                record[f"{prefix}_input_tokens"] = stage_tokens.get("input_tokens", 0)
-                record[f"{prefix}_output_tokens"] = stage_tokens.get("output_tokens", 0)
-                record[f"{prefix}_total_tokens"] = stage_tokens.get("total_tokens", 0)
+                record[f"{prefix}.input_tokens"] = stage_tokens.get("input_tokens", 0)
+                record[f"{prefix}.output_tokens"] = stage_tokens.get("output_tokens", 0)
+                record[f"{prefix}.total_tokens"] = stage_tokens.get("total_tokens", 0)
 
     return record
 
