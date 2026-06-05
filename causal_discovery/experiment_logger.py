@@ -56,11 +56,36 @@ def _flatten_token_usage(record: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+_HISTORY_KEY_TO_COLUMN: dict[str, str] = {
+    "undirected_skeleton_history": "undirected_skeleton.reasoning",
+    "v_structures_history": "v_structures.reasoning",
+    "meek_rules_history": "meek_rules.reasoning",
+    "hypothesis_evaluation_history": "hypothesis_evaluation.reasoning",
+}
+
+
+def _flatten_reasoning(record: dict[str, Any]) -> dict[str, Any]:
+    """
+    Extract per-stage reasoning from history dicts into flat CSV columns.
+
+    Each history key is replaced by a ``{prefix}.reasoning`` column containing
+    only the ``reasoning`` text from that stage's history dict.
+    """
+    for history_key, col_name in _HISTORY_KEY_TO_COLUMN.items():
+        history = record.pop(history_key, None)
+        if isinstance(history, dict):
+            record[col_name] = history.get("reasoning")
+        else:
+            record[col_name] = None
+    return record
+
+
 class ExperimentLogger:
     """
     Create logging CSV file up‑front and append rows to it as each experiment finishes.
     """
-    def __init__(self, logs_dir: Path, job_id: Optional[str] = None) -> None:
+    def __init__(self, logs_dir: Path, job_id: Optional[str] = None,
+                 log_reasoning: bool = False) -> None:
         self.logs_dir = logs_dir
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -71,6 +96,7 @@ class ExperimentLogger:
         self.log_file = self.logs_dir / filename
 
         self._fieldnames: Optional[list[str]] = None
+        self.log_reasoning = log_reasoning
 
     def _init_header(self, fieldnames: list[str]) -> None:
         with self.log_file.open("w", newline="") as f:
@@ -87,6 +113,9 @@ class ExperimentLogger:
             record = {**record, "hypothesis_label": label}
         # Flatten nested token_usage into scalar columns before CSV serialization
         record = _flatten_token_usage(record)
+        # Flatten per-stage reasoning history when enabled
+        if self.log_reasoning:
+            record = _flatten_reasoning(record)
         return record
 
     def append(self, record: dict[str, Any]) -> None:

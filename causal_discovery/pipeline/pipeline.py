@@ -9,9 +9,14 @@ from causal_discovery.experiment_logger import ExperimentLogger
 
 
 class CausalDiscoveryPipeline:
-    def __init__(self, stages: list[Stage], logger: ExperimentLogger):
+    def __init__(self, stages: list[Stage], logger: ExperimentLogger,
+                 pass_reasoning: bool = False):
         self.stages = stages
         self.logger = logger
+        self.pass_reasoning = pass_reasoning
+        # Propagate flag to each stage
+        for stage in stages:
+            stage.pass_reasoning = pass_reasoning
 
     def run(self, input_data: dict[str, Any]) -> dict[str, Any]:
         """

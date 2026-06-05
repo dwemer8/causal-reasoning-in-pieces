@@ -17,6 +17,71 @@ RETRY_BASE_DELAY = 1.0
 RETRY_MAX_DELAY = 30.0
 PER_REQUEST_TIMEOUT = 1800  # Hard per-API-call timeout via multiprocessing (30 min for long-thinking models)
 
+_THINK_OPEN = chr(60) + "think" + chr(62)  #  thinking
+_THINK_CLOSE = chr(60) + "/think" + chr(62)  #  response
+
+
+def _split_think_tags(text: str) -> tuple[str, Optional[str]]:
+    """
+    Separate reasoning from final answer when thinking is inline in the content.
+
+    Some models (e.g. Qwen with thinking mode via vLLM) embed chain-of-thought
+    inside `` ... `` XML tags within the same content field. This function
+    splits them so the reasoning and final answer are separate.
+
+    Returns ``(content, reasoning)``:
+    - ``content``: The text after the closing `` tag (the final answer).
+    - ``reasoning``: The text inside the `` tags, or ``None`` if no tags found.
+    """
+    if _THINK_OPEN not in text:
+        return text, None
+
+    start_pos = text.find(_THINK_OPEN) + len(_THINK_OPEN)
+    end_pos = text.find(_THINK_CLOSE, start_pos)
+
+    if end_pos != -1:
+        reasoning = text[start_pos:end_pos].strip()
+        content = text[end_pos + len(_THINK_CLOSE):].strip()
+        return content, reasoning if reasoning else None
+
+    # Unclosed `` — everything after `` is reasoning
+    reasoning = text[start_pos:].strip()
+    content = text[:text.find(_THINK_OPEN)].strip()
+    return content, reasoning if reasoning else None
+
+
+def _extract_reasoning(message) -> tuple[Optional[str], Optional[str]]:
+    """
+    Extract reasoning content from an OpenAI chat completion message.
+
+    Tries multiple sources in order:
+    1. ``message.model_extra["reasoning"]`` — gpt-oss reasoning storage.
+    2. ``message.reasoning_content`` — DeepSeek / Qwen SDK attribute.
+    3. Inline `` ... `` tags in ``message.content`` — Qwen via vLLM fallback.
+
+    Returns ``(content, reasoning)``:
+    - ``content``: The final answer text (may differ from ``message.content``
+      if inline think tags were stripped).
+    - ``reasoning``: The reasoning text, or ``None`` if unavailable.
+    """
+    reasoning = None
+    content = message.content
+
+    # gpt-oss: reasoning stored in model_extra
+    if message.model_extra:
+        reasoning = message.model_extra.get("reasoning")
+
+    # DeepSeek / Qwen: reasoning_content SDK attribute
+    if reasoning is None and hasattr(message, 'reasoning_content'):
+        reasoning = getattr(message, 'reasoning_content', None)
+
+    # Fallback: inline  ...  tags in content
+    if reasoning is None and content:
+        content, reasoning = _split_think_tags(content)
+
+    return content, reasoning
+
+
 if TYPE_CHECKING:
     from transformers import Pipeline
 
@@ -25,8 +90,9 @@ def _call_api_in_subprocess(result_queue: multiprocessing.Queue,
                              api_key: str, base_url: str, kwargs: dict) -> None:
     """Run a single chat.completions.create() call in a subprocess.
 
-    Puts (text, usage_dict) or (None, None) into result_queue.
-    Uses a separate process to guarantee that hung TCP connections can be killed.
+    Puts ``(content, reasoning, usage_dict)`` or ``(None, None, None)`` into
+    result_queue. Uses a separate process to guarantee that hung TCP connections
+    can be killed.
     """
     try:
         from openai import OpenAI
@@ -35,24 +101,34 @@ def _call_api_in_subprocess(result_queue: multiprocessing.Queue,
         usage = {"prompt_tokens": resp.usage.prompt_tokens,
                  "completion_tokens": resp.usage.completion_tokens,
                  "total_tokens": resp.usage.total_tokens}
-        result_queue.put((resp.choices[0].message.content, usage))
+        content, reasoning = _extract_reasoning(resp.choices[0].message)
+        result_queue.put((content, reasoning, usage))
     except Exception:
-        result_queue.put((None, None))
+        result_queue.put((None, None, None))
 
 
 class BaseLLMClient(ABC):
     @abstractmethod
-    def complete(self, prompt: str) -> tuple[Optional[str], Optional[dict]]:
+    def complete(self, prompt: str) -> tuple[Optional[str], Optional[str], Optional[dict]]:
         """
-        Sends the prompt to the LLM and returns the response as a string.
+        Sends the prompt to the LLM and returns ``(content, reasoning, usage)``.
+
+        - ``content``: The final answer text, or ``None`` on failure.
+        - ``reasoning``: The model's chain-of-thought/thinking trace, or ``None``
+          if the backend or model does not expose reasoning.
+        - ``usage``: Token usage dict with ``prompt_tokens``, ``completion_tokens``,
+          ``total_tokens``, or ``None`` on failure.
         """
         pass
 
     @abstractmethod
-    def complete_batch(self, prompts: list[str]) -> list[str]:
+    def complete_batch(self, prompts: list[str]) -> list[tuple[Optional[str], Optional[str], Optional[dict]]]:
         """
-        Sends a list of prompts to the LLM and returns a list of responses.
-        Clients that support true batch execution should override this, otherwise throw an exception.
+        Sends a list of prompts to the LLM and returns a list of
+        ``(content, reasoning, usage)`` tuples.
+
+        Clients that support true batch execution should override this, otherwise
+        throw an exception.
         """
         pass
 
@@ -134,16 +210,17 @@ class OpenAIClient(BaseLLMClient):
         return kwargs
 
 
-    def complete(self, prompt: str) -> tuple[Optional[str], Optional[dict]]:
+    def complete(self, prompt: str) -> tuple[Optional[str], Optional[str], Optional[dict]]:
+        """Single-prompt call. Returns ``(content, reasoning, usage)``."""
         messages = [{"role": "user", "content": prompt}]
         kwargs = self._build_kwargs(messages)
         response = self.client.chat.completions.create(**kwargs)
 
         usage = response.usage
-        text = response.choices[0].message.content
-        return text, usage
+        content, reasoning = _extract_reasoning(response.choices[0].message)
+        return content, reasoning, usage
 
-    def _call_with_retry(self, prompt: str) -> tuple[Optional[str], Optional[dict]]:
+    def _call_with_retry(self, prompt: str) -> tuple[Optional[str], Optional[str], Optional[dict]]:
         """Call the LLM with retry logic. Each API call runs in a subprocess
         with a hard timeout to guarantee termination of hung TCP connections."""
         deadline = time.monotonic() + RETRY_MAX_SECONDS
@@ -164,19 +241,19 @@ class OpenAIClient(BaseLLMClient):
                     proc.join(timeout=5)
                     raise TimeoutError(f"API call timed out after {PER_REQUEST_TIMEOUT}s")
                 if not queue.empty():
-                    text, usage = queue.get()
-                    return text, usage
+                    content, reasoning, usage = queue.get()
+                    return content, reasoning, usage
                 raise RuntimeError(f"API subprocess returned no result (exit code {proc.exitcode})")
             except Exception as e:
                 msg = str(e)[:120]
                 if time.monotonic() >= deadline:
                     logging.error("LLM call failed after %.0fs retries: %s", RETRY_MAX_SECONDS, msg)
-                    return None, None
+                    return None, None, None
                 logging.warning("LLM call failed, retrying in %.1fs: %s", delay, msg)
                 time.sleep(delay)
                 delay = min(delay * 2, RETRY_MAX_DELAY)
 
-    def complete_batch(self, prompts: list[str]) -> list[tuple[Optional[str], Optional[dict]]]:
+    def complete_batch(self, prompts: list[str]) -> list[tuple[Optional[str], Optional[str], Optional[dict]]]:
         """Run batch of prompts concurrently using thread pool."""
         with ThreadPoolExecutor(max_workers=self.concurrency) as executor:
             futures = {executor.submit(self._call_with_retry, p): i for i, p in enumerate(prompts)}
@@ -187,7 +264,7 @@ class OpenAIClient(BaseLLMClient):
                     results[idx] = future.result(timeout=RETRY_MAX_SECONDS + 120)
                 except Exception as e:
                     logging.error("Thread for prompt %d failed: %s", idx, e)
-                    results[idx] = (None, None)
+                    results[idx] = (None, None, None)
         return results
 
 

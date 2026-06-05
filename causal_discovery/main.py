@@ -138,6 +138,12 @@ def parse_arguments() -> argparse.Namespace:
         default=DEFAULT_TIMEOUT,
         help="HTTP timeout in seconds (default: DEFAULT_TIMEOUT = 30 min).",
     )
+    parser.add_argument(
+        "--pass-reasoning",
+        action="store_true",
+        default=False,
+        help="Pass reasoning content from previous stages into subsequent stage prompts.",
+    )
     return parser.parse_args()
 
 
@@ -269,6 +275,7 @@ def post_process_logs(
     timeout: float = DEFAULT_TIMEOUT,
     min_idx: int = None,
     max_idx: int = None,
+    pass_reasoning: bool = False,
     mean_input_tokens: float = 0.0,
     mean_output_tokens: float = 0.0,
     mean_total_tokens: float = 0.0,
@@ -290,6 +297,9 @@ def post_process_logs(
         thinking: Whether thinking mode was enabled.
         max_tokens: Maximum tokens for completion.
         timeout: HTTP timeout in seconds.
+        min_idx: Minimum sample index (from CLI).
+        max_idx: Maximum sample index (from CLI).
+        pass_reasoning: Whether reasoning passthrough was enabled.
         mean_input_tokens: Mean input tokens per sample across all stages.
         mean_output_tokens: Mean output tokens per sample across all stages.
         mean_total_tokens: Mean total tokens per sample across all stages.
@@ -343,6 +353,7 @@ def post_process_logs(
         "timeout": f"{timeout}",
         "min_idx": f"{min_idx}",
         "max_idx": f"{max_idx}",
+        "pass_reasoning": pass_reasoning,
         "logs_path": logs_path,
         "accuracy": f"{accuracy:.4f}",
         "precision": f"{precision:.4f}",
@@ -403,10 +414,11 @@ def main() -> None:
     hypothesis_evaluation_stage = HypothesisEvaluationStage(client=client)
 
     job_id = Path(args.input_file).stem
-    logger = ExperimentLogger(LOGS_DIR, job_id)
+    logger = ExperimentLogger(LOGS_DIR, job_id, log_reasoning=args.pass_reasoning)
     pipeline: CausalDiscoveryPipeline = CausalDiscoveryPipeline(
         stages=[skeleton_stage, v_structures_stage, meek_rules_stage, hypothesis_evaluation_stage],
         logger=logger,
+        pass_reasoning=args.pass_reasoning,
     )
 
     results = []
@@ -450,6 +462,7 @@ def main() -> None:
         args.timeout,
         min_idx=min_idx,
         max_idx=max_idx,
+        pass_reasoning=args.pass_reasoning,
         mean_input_tokens=mean_tokens["mean_input_tokens"],
         mean_output_tokens=mean_tokens["mean_output_tokens"],
         mean_total_tokens=mean_tokens["mean_total_tokens"],

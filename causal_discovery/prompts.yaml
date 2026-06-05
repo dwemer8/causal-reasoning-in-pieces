@@ -28,6 +28,8 @@ undirected_skeleton: |
   Premise: {premise}
 
 v_structures: |
+  {prior_history}
+
   You are an expert in causal discovery, specializing in the Peter-Clark (PC) algorithm. With a deep understanding of undirected skeletons and separation sets, your task in this stage is to identify v-structures. Analyze the given undirected skeleton along with the corresponding separation sets to pinpoint the colliders that indicate potential directional causal relationships among the variables.
   
   **Task:** You are given a causal skeleton (an undirected graph produced by the PC algorithm) and a Premise that contains independence statements. Your job is to perform two distinct steps:
@@ -72,6 +74,8 @@ v_structures: |
   ```
 
 meek_rules: |
+  {prior_history}
+
   You are an expert in causal inference with deep knowledge of the PC algorithm’s Meek orientation rules. Your task is to convert a given undirected causal skeleton into a partially directed acyclic graph (PDAG) by orienting as many edges as possible while following these rules:
 
   **Rules and Constraints:**
@@ -130,6 +134,8 @@ meek_rules: |
   ```
 
 hypothesis_evaluation: |
+  {prior_history}
+
   You are a specialist in causal discovery algorithms, particularly the Peter-Clark (PC) algorithm, with a proven ability to evaluate complex causal relationships. In this final stage, your task is to assess a specific hypothesis regarding causal relationships between variables. Based on the constructed and oriented graph—derived from correlation statements, independence assertions, v-structures, and the application of Meek rules—determine whether the evidence supports or contradicts the proposed causal hypothesis.
 
   **Task:** Evaluate whether the given causal hypothesis is supported by the provided causal graph.

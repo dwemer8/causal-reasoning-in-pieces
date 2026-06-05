@@ -1,10 +1,26 @@
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Optional
 
 from causal_discovery.llm_client import BaseLLMClient
 from causal_discovery.utils import load_prompts, extract_causal_skeleton_json, extract_v_structures_json, \
     extract_directed_edges_literal_format_json, extract_hypothesis_answer, extract_undirected_edges_literal_format_json
+
+# Maps stage class name to sample dict key for storing stage history
+_STAGE_HISTORY_KEYS: dict[str, str] = {
+    "UndirectedSkeletonStage": "undirected_skeleton_history",
+    "VStructuresStage": "v_structures_history",
+    "MeekRulesStage": "meek_rules_history",
+    "HypothesisEvaluationStage": "hypothesis_evaluation_history",
+}
+
+# Order of stages for formatting prior history
+_STAGE_ORDER: list[str] = [
+    "UndirectedSkeletonStage",
+    "VStructuresStage",
+    "MeekRulesStage",
+    "HypothesisEvaluationStage",
+]
 
 
 class Stage(ABC):
@@ -79,6 +95,105 @@ class Stage(ABC):
         )
         logging.info(f"Overall token usage: {sample['token_usage']}")
 
+    def _build_stage_history(
+        self,
+        sample: dict[str, Any],
+        reasoning: Optional[str],
+        input_keys: dict[str, str],
+        output_keys: dict[str, str],
+    ) -> dict[str, Any]:
+        """
+        Build a stage history dict capturing this stage's input, reasoning, and output.
+
+        Stored in the sample under the key from ``_STAGE_HISTORY_KEYS``.
+
+        :param sample: The sample dict after this stage has processed it.
+        :param reasoning: The raw reasoning text from the LLM, or ``None``.
+        :param input_keys: Mapping of prompt template placeholder → sample dict key
+            for the inputs this stage was given.
+        :param output_keys: Mapping of output field name → sample dict key
+            for the outputs this stage produced.
+        :returns: The history dict that was stored.
+        """
+        if not getattr(self, 'pass_reasoning', False):
+            return {}
+
+        stage_name = self.__class__.__name__
+        history_key = _STAGE_HISTORY_KEYS.get(stage_name)
+        if history_key is None:
+            return {}
+
+        history: dict[str, Any] = {
+            "stage": stage_name,
+            "input": {},
+            "reasoning": reasoning,
+            "output": {},
+        }
+
+        # Capture inputs
+        for label, key in input_keys.items():
+            history["input"][label] = sample.get(key)
+
+        # Capture outputs
+        for label, key in output_keys.items():
+            history["output"][label] = sample.get(key)
+
+        sample[history_key] = history
+        return history
+
+    def _format_prior_history(self, sample: dict[str, Any]) -> str:
+        """
+        Collect and format all prior stages' history as a text block.
+
+        Returns an empty string if ``pass_reasoning`` is disabled or no prior
+        history exists.
+
+        :param sample: The sample dict with accumulated stage histories.
+        :returns: A formatted multi-line string ready to prepend to a prompt,
+            or an empty string.
+        """
+        if not getattr(self, 'pass_reasoning', False):
+            return ""
+
+        current_stage = self.__class__.__name__
+        sections: list[str] = []
+
+        for stage_name in _STAGE_ORDER:
+            if stage_name == current_stage:
+                break
+            history_key = _STAGE_HISTORY_KEYS.get(stage_name)
+            if history_key is None:
+                continue
+            history = sample.get(history_key)
+            if history is None:
+                continue
+
+            sections.append(f"### Stage: {stage_name}")
+
+            # Input section
+            if history.get("input"):
+                sections.append("**Input:**")
+                for label, value in history["input"].items():
+                    sections.append(f"- {label}: {value}")
+
+            # Reasoning section
+            reasoning = history.get("reasoning")
+            if reasoning:
+                sections.append(f"\n**Reasoning:**\n{reasoning}")
+            else:
+                sections.append("\n**Reasoning:** No reasoning available.")
+
+            # Output section
+            if history.get("output"):
+                sections.append("\n**Output:**")
+                for label, value in history["output"].items():
+                    sections.append(f"- {label}: {value}")
+
+        if not sections:
+            return ""
+
+        return "**Previous stages history:**\n\n" + "\n\n".join(sections)
+
 
 class UndirectedSkeletonStage(Stage):
     """
@@ -96,7 +211,7 @@ class UndirectedSkeletonStage(Stage):
 
         # 3. Send request to LLM
         logging.info("UndirectedSkeletonStage: Sending prompt to LLM.")
-        response, usage = self.client.complete(prompt=prompt)
+        response, reasoning, usage = self.client.complete(prompt=prompt)
 
         # 4. Unpack responses and update token usage
         self._update_token_usage(input_data, usage)
@@ -110,6 +225,12 @@ class UndirectedSkeletonStage(Stage):
             input_data["nodes"] = None
             input_data["undirected_edges"] = None
 
+        self._build_stage_history(
+            input_data,
+            reasoning=reasoning,
+            input_keys={"premise": "premise"},
+            output_keys={"nodes": "nodes", "undirected_edges": "undirected_edges"},
+        )
         return input_data
 
     def process_batch(self, inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -144,13 +265,13 @@ class UndirectedSkeletonStage(Stage):
             raise
 
         # 4. Unpack responses into texts and usages, and update token usage
-        for i, ((text, usage), item) in enumerate(zip(responses, inputs)):
+        for i, ((text, reasoning, usage), item) in enumerate(zip(responses, inputs)):
             logging.debug("Raw response text for sample %d: %s", i, text)
             logging.debug("Token usage for sample %d: %s", i, usage)
             self._update_token_usage(item, usage)
 
         # 5. Parse skeleton from each response text
-        for i, ((text, _), item) in enumerate(zip(responses, inputs)):
+        for i, ((text, reasoning, _), item) in enumerate(zip(responses, inputs)):
             try:
                 skeleton = extract_causal_skeleton_json(answer=text)
                 item["nodes"] = skeleton["nodes"]
@@ -162,6 +283,13 @@ class UndirectedSkeletonStage(Stage):
                 logging.debug("Problematic response for sample %d: %s", i, text)
                 item["nodes"] = None
                 item["undirected_edges"] = None
+
+            self._build_stage_history(
+                item,
+                reasoning=reasoning,
+                input_keys={"premise": "premise"},
+                output_keys={"nodes": "nodes", "undirected_edges": "undirected_edges"},
+            )
 
         return inputs
 
@@ -179,15 +307,17 @@ class VStructuresStage(Stage):
             raise ValueError(f"Input data must contain: {', '.join(required_keys)}.")
 
         # 2. Build prompt
+        prior_history = self._format_prior_history(input_data)
         prompt = self.prompt_template.format(
             premise=input_data["premise"],
             nodes=input_data["nodes"],
             edges=self._format_edges(input_data["undirected_edges"]),
+            prior_history=prior_history,
         )
 
         # 3. Send request to LLM
         logging.info("VStructuresStage: Sending prompt to LLM.")
-        response, usage = self.client.complete(prompt=prompt)
+        response, reasoning, usage = self.client.complete(prompt=prompt)
 
         # 4. Unpack responses and update token usage
         self._update_token_usage(input_data, usage)
@@ -199,6 +329,12 @@ class VStructuresStage(Stage):
             logging.debug("Problematic response: %s", response)
             input_data["v_structures"] = None
 
+        self._build_stage_history(
+            input_data,
+            reasoning=reasoning,
+            input_keys={"premise": "premise", "skeleton": "undirected_edges"},
+            output_keys={"v_structures": "v_structures"},
+        )
         return input_data
 
     def process_batch(self, inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -230,10 +366,12 @@ class VStructuresStage(Stage):
         prompts = []
         for i in valid_indices:
             input_data = inputs[i]
+            prior_history = self._format_prior_history(input_data)
             prompt = self.prompt_template.format(
                 premise=input_data["premise"],
                 nodes=input_data["nodes"],
                 edges=self._format_edges(input_data["undirected_edges"]),
+                prior_history=prior_history,
             )
             prompts.append(prompt)
             logging.debug("Constructed prompt for sample %d: %s", i, prompt)
@@ -250,14 +388,14 @@ class VStructuresStage(Stage):
 
         # 5. Unpack responses and update token usage for valid samples
         for j, i in enumerate(valid_indices):
-            text, usage = responses[j]
+            text, reasoning, usage = responses[j]
             logging.debug("Raw response text for sample %d: %s", i, text)
             logging.debug("Token usage for sample %d: %s", i, usage)
             self._update_token_usage(inputs[i], usage)
 
         # 6. Parse v-structures from each valid response
         for j, i in enumerate(valid_indices):
-            text, _ = responses[j]
+            text, reasoning, _ = responses[j]
             try:
                 v_structures = extract_v_structures_json(answer=text)
                 inputs[i]["v_structures"] = v_structures
@@ -266,6 +404,13 @@ class VStructuresStage(Stage):
                 logging.error("Error extracting V-structures for sample %d: %s", i, e)
                 logging.debug("Problematic response for sample %d: %s", i, text)
                 inputs[i]["v_structures"] = None
+
+            self._build_stage_history(
+                inputs[i],
+                reasoning=reasoning,
+                input_keys={"premise": "premise", "skeleton": "undirected_edges"},
+                output_keys={"v_structures": "v_structures"},
+            )
 
         return inputs
 
@@ -282,15 +427,18 @@ class MeekRulesStage(Stage):
             raise ValueError(f"Meek rules stage input data must contain: {', '.join(required_keys)}.")
 
         # 2. Build prompt
+        prior_history = self._format_prior_history(input_data)
         prompt = self.prompt_template.format(
             premise=input_data["premise"],
             nodes=input_data["nodes"],
             edges=self._format_edges(input_data["undirected_edges"]),
-            v_structures=input_data["v_structures"])
+            v_structures=input_data["v_structures"],
+            prior_history=prior_history,
+        )
 
         # 3. Send request to LLM
         logging.info("MeekRulesStage: Sending prompt to LLM.")
-        response, usage = self.client.complete(prompt=prompt)
+        response, reasoning, usage = self.client.complete(prompt=prompt)
 
         # 4. Unpack responses and update token usage
         self._update_token_usage(input_data, usage)
@@ -304,6 +452,13 @@ class MeekRulesStage(Stage):
             logging.debug("Problematic response: %s", response)
             input_data["directed_edges"] = None
             input_data["undirected_edges"] = None
+
+        self._build_stage_history(
+            input_data,
+            reasoning=reasoning,
+            input_keys={"premise": "premise", "skeleton": "undirected_edges", "v_structures": "v_structures"},
+            output_keys={"directed_edges": "directed_edges", "undirected_edges": "undirected_edges"},
+        )
         return input_data
 
     def process_batch(self, inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -334,11 +489,13 @@ class MeekRulesStage(Stage):
         prompts = []
         for i in valid_indices:
             input_data = inputs[i]
+            prior_history = self._format_prior_history(input_data)
             prompt = self.prompt_template.format(
                 premise=input_data["premise"],
                 nodes=input_data["nodes"],
                 edges=self._format_edges(input_data["undirected_edges"]),
-                v_structures=input_data["v_structures"]
+                v_structures=input_data["v_structures"],
+                prior_history=prior_history,
             )
             prompts.append(prompt)
             logging.debug("Constructed prompt for sample %d: %s", i, prompt)
@@ -355,14 +512,14 @@ class MeekRulesStage(Stage):
 
         # 5. Unpack responses and update token usage for valid samples
         for j, i in enumerate(valid_indices):
-            text, usage = responses[j]
+            text, reasoning, usage = responses[j]
             logging.debug("Raw response text for sample %d: %s", i, text)
             logging.debug("Token usage for sample %d: %s", i, usage)
             self._update_token_usage(inputs[i], usage)
 
         # 6. Parse directed/undirected edges from each valid response
         for j, i in enumerate(valid_indices):
-            text, _ = responses[j]
+            text, reasoning, _ = responses[j]
             try:
                 directed_edges = extract_directed_edges_literal_format_json(answer=text)
                 undirected_edges = extract_undirected_edges_literal_format_json(answer=text)
@@ -374,6 +531,13 @@ class MeekRulesStage(Stage):
                 undirected_edges = None
             inputs[i]["directed_edges"] = directed_edges
             inputs[i]["undirected_edges"] = undirected_edges
+
+            self._build_stage_history(
+                inputs[i],
+                reasoning=reasoning,
+                input_keys={"premise": "premise", "skeleton": "undirected_edges", "v_structures": "v_structures"},
+                output_keys={"directed_edges": "directed_edges", "undirected_edges": "undirected_edges"},
+            )
 
         return inputs
 
@@ -391,17 +555,19 @@ class HypothesisEvaluationStage(Stage):
             raise ValueError(f"Hypothesis evaluation stage input data must contain: {', '.join(required_keys)}.")
 
         # 2. Build prompt
+        prior_history = self._format_prior_history(input_data)
         prompt = self.prompt_template.format(
             premise=input_data["premise"],
             nodes=input_data["nodes"],
             directed_edges=self._format_edges(input_data["directed_edges"]),
             undirected_edges=self._format_edges(input_data["undirected_edges"]),
-            hypothesis=input_data["hypothesis"]
+            hypothesis=input_data["hypothesis"],
+            prior_history=prior_history,
         )
 
         # 3. Send request to LLM
         logging.info("HypothesisEvaluationStage: Sending prompt to LLM.")
-        response, usage = self.client.complete(prompt=prompt)
+        response, reasoning, usage = self.client.complete(prompt=prompt)
 
         # 4. Unpack responses and update token usage
         self._update_token_usage(input_data, usage)
@@ -412,6 +578,18 @@ class HypothesisEvaluationStage(Stage):
             logging.error("Error extracting hypothesis_label: %s", e)
             logging.debug("Problematic response: %s", response)
             input_data["hypothesis_label"] = None
+
+        self._build_stage_history(
+            input_data,
+            reasoning=reasoning,
+            input_keys={
+                "premise": "premise",
+                "directed_edges": "directed_edges",
+                "undirected_edges": "undirected_edges",
+                "hypothesis": "hypothesis",
+            },
+            output_keys={"hypothesis_label": "hypothesis_label"},
+        )
         return input_data
 
     def process_batch(self, inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -441,12 +619,14 @@ class HypothesisEvaluationStage(Stage):
         prompts = []
         for i in valid_indices:
             input_data = inputs[i]
+            prior_history = self._format_prior_history(input_data)
             prompt = self.prompt_template.format(
                 premise=input_data["premise"],
                 nodes=input_data["nodes"],
                 directed_edges=self._format_edges(input_data["directed_edges"]),
                 undirected_edges=self._format_edges(input_data["undirected_edges"]),
-                hypothesis=input_data["hypothesis"]
+                hypothesis=input_data["hypothesis"],
+                prior_history=prior_history,
             )
             prompts.append(prompt)
             logging.debug("Constructed prompt for sample %d: %s", i, prompt)
@@ -463,14 +643,14 @@ class HypothesisEvaluationStage(Stage):
 
         # 5. Unpack responses and update token usage for valid samples
         for j, i in enumerate(valid_indices):
-            text, usage = responses[j]
+            text, reasoning, usage = responses[j]
             logging.debug("Raw response text for sample %d: %s", i, text)
             logging.debug("Token usage for sample %d: %s", i, usage)
             self._update_token_usage(inputs[i], usage)
 
         # 6. Parse hypothesis label from each valid response
         for j, i in enumerate(valid_indices):
-            text, _ = responses[j]
+            text, reasoning, _ = responses[j]
             try:
                 hypothesis_label = extract_hypothesis_answer(answer=text)
                 inputs[i]["hypothesis_label"] = hypothesis_label
@@ -479,5 +659,17 @@ class HypothesisEvaluationStage(Stage):
                 logging.error("Error extracting hypothesis_label for sample %d: %s", i, e)
                 logging.debug("Problematic response for sample %d: %s", i, text)
                 inputs[i]["hypothesis_label"] = None
+
+            self._build_stage_history(
+                inputs[i],
+                reasoning=reasoning,
+                input_keys={
+                    "premise": "premise",
+                    "directed_edges": "directed_edges",
+                    "undirected_edges": "undirected_edges",
+                    "hypothesis": "hypothesis",
+                },
+                output_keys={"hypothesis_label": "hypothesis_label"},
+            )
 
         return inputs
