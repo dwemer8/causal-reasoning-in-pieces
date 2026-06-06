@@ -416,7 +416,24 @@ def main() -> None:
     if args.mode == "batched":
         logging.info("Running pipeline in batched mode.")
         batch_pipeline = BatchCasualDiscoveryPipeline(pipeline=pipeline, batch_size=args.batch_size)
-        results, failed_ids = batch_pipeline.run_batch(input_samples)
+        try:
+            results, failed_ids = batch_pipeline.run_batch(input_samples)
+        except Exception as e:
+            logging.error(f"Pipeline crashed during batched execution: {e}")
+            logging.info("Attempting to post-process partial results from the log file...")
+            if logger.log_file.exists():
+                try:
+                    partial_df = pd.read_csv(logger.log_file)
+                    results = partial_df.to_dict("records")
+                    logging.info(f"Recovered {len(results)} partial results from {logger.log_file}.")
+                except Exception as read_err:
+                    logging.error(f"Failed to read partial log file: {read_err}")
+                    results = []
+            else:
+                logging.warning("No log file found — no results to recover.")
+                results = []
+            # # Mark all input samples as potentially failed for tracking.
+            # failed_ids = [s["sample_id"] for s in input_samples]
     else:
         logging.info("Running pipeline in sequential mode.")
         for sample in tqdm(input_samples, desc="Processing samples"):
